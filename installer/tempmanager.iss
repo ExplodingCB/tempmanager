@@ -66,6 +66,11 @@ Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreve
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"; IconFilename: "{app}\tempmanager.ico"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; IconFilename: "{app}\tempmanager.ico"; Tasks: desktopicon
 
+[UninstallDelete]
+; Diagnostic output from --probe / --shot, written next to the exe.
+Type: files; Name: "{app}\probe.txt"
+Type: files; Name: "{app}\popup.bmp"
+
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
 
