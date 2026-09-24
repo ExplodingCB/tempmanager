@@ -1,0 +1,600 @@
+{
+  "Executable": "D:\\Projects\\tempmanager\\target\\audit-after\\x86_64-pc-windows-gnu\\release\\tempmanager.exe",
+  "BinaryBytes": 448512,
+  "IntervalSeconds": 30,
+  "DurationSeconds": 65.976,
+  "CpuSeconds": 0.046875,
+  "CpuPercentOfOneCore": 0.07104856311385958,
+  "WorkingSetBytes": 40566784,
+  "PrivateBytes": 22814720,
+  "Threads": 6,
+  "Handles": 226,
+  "GdiObjects": 15,
+  "Readings": [
+    {
+      "Seconds": 1.013,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 2.042,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 3.048,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 4.06,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 5.075,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 6.091,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 7.11,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 8.124,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 9.142,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 10.153,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 11.171,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 12.185,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 13.195,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 14.212,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 15.224,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 16.237,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 17.252,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 18.265,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 19.28,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 20.293,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 21.304,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 22.318,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 23.337,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 24.351,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35614720,
+      "PrivateBytes": 22257664,
+      "Handles": 189,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 25.364,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35622912,
+      "PrivateBytes": 22249472,
+      "Handles": 188,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 26.383,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35622912,
+      "PrivateBytes": 22249472,
+      "Handles": 188,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 27.4,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35622912,
+      "PrivateBytes": 22249472,
+      "Handles": 188,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 28.413,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35622912,
+      "PrivateBytes": 22249472,
+      "Handles": 188,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 29.425,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35622912,
+      "PrivateBytes": 22249472,
+      "Handles": 188,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 30.439,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35622912,
+      "PrivateBytes": 22249472,
+      "Handles": 188,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 31.455,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35622912,
+      "PrivateBytes": 22249472,
+      "Handles": 188,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 32.471,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35622912,
+      "PrivateBytes": 22249472,
+      "Handles": 188,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 33.488,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35622912,
+      "PrivateBytes": 22249472,
+      "Handles": 188,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 34.494,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35622912,
+      "PrivateBytes": 22249472,
+      "Handles": 188,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 35.511,
+      "CpuSeconds": 0.0,
+      "WorkingSetBytes": 35622912,
+      "PrivateBytes": 22249472,
+      "Handles": 188,
+      "Threads": 4,
+      "GdiObjects": 7
+    },
+    {
+      "Seconds": 36.527,
+      "CpuSeconds": 0.015625,
+      "WorkingSetBytes": 40521728,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 37.545,
+      "CpuSeconds": 0.015625,
+      "WorkingSetBytes": 40534016,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 38.552,
+      "CpuSeconds": 0.03125,
+      "WorkingSetBytes": 40534016,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 39.57,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 40.583,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 41.599,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 42.613,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 43.63,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 44.649,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 45.666,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 46.68,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 47.696,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 48.713,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 49.727,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 50.744,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 51.762,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 52.777,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 53.793,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 54.801,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 55.817,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 56.829,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 57.845,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 58.861,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 59.874,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 60.894,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 61.912,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 62.93,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 63.948,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 64.964,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 227,
+      "Threads": 6,
+      "GdiObjects": 15
+    },
+    {
+      "Seconds": 65.976,
+      "CpuSeconds": 0.046875,
+      "WorkingSetBytes": 40566784,
+      "PrivateBytes": 22814720,
+      "Handles": 226,
+      "Threads": 6,
+      "GdiObjects": 15
+    }
+  ]
+}

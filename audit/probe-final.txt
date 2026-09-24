@@ -1,0 +1,18 @@
+cpu backend: run as administrator for CPU temps
+
+--- ryzen sdk diagnosis ---
+locate: C:\Program Files\AMD\RyzenMasterMonitoringSDK\bin\Platform.dll
+LoadLibraryEx: ok
+GetPlatform: 0x7ff873c857c8
+IPlatform::Init -> false
+result: backend unavailable
+---
+
+elevated   : false
+ryzen sdk  : found at C:\Program Files\AMD\RyzenMasterMonitoringSDK
+  dll      : C:\Program Files\AMD\RyzenMasterMonitoringSDK\bin\Platform.dll
+channels   : 3
+
+[GPU ] RTX 5080                 49.0°
+[DISK] WD_BLACK SN850X 2000GB   50.0°
+[DISK] CT1000P2SSD8             42.0°

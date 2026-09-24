@@ -1,0 +1,2326 @@
+diff --git a/audit/original/src/app.rs b/src/app.rs
+index 6106af5..544a14f 100644
+--- a/audit/original/src/app.rs
++++ b/src/app.rs
+@@ -23,15 +23,10 @@ pub struct App {
+     pub histories: Vec<History>,
+     /// Scratch for the most recent sample, reused every tick.
+     pub latest: Vec<i16>,
+-    /// Seconds represented by each stored sample, index-aligned with the
+-    /// histories.
+-    ///
+-    /// The sampling rate changes while the flyout is open, so the chart cannot
+-    /// assume a fixed cadence -- a window of 240 samples might be two hours of
+-    /// background sampling or four minutes of live sampling, or a mix. Storing
+-    /// the interval alongside each sample makes the time axis exact for two
+-    /// bytes a sample instead of guessing.
+-    pub spans: History,
++    pub tray_dirty: bool,
++    /// Monotonic timestamps in milliseconds, aligned with every channel.
++    /// GetTickCount64 includes sleep and is unaffected by wall-clock changes.
++    pub times: History<u64>,
+     pub popup: windows_sys::Win32::Foundation::HWND,
+     /// True while the user is dragging the interval slider.
+     pub dragging: bool,
+@@ -46,25 +41,36 @@ impl App {
+             config,
+             sensors,
+             histories: (0..n).map(|_| History::new()).collect(),
+-            spans: History::new(),
++            times: History::new(),
+             latest: vec![NO_VALUE; n],
++            tray_dirty: true,
+             popup: std::ptr::null_mut(),
+             dragging: false,
+         }
+     }
+ 
+     /// Take one reading from every sensor and append it to the history.
+-    ///
+-    /// `interval_s` is the cadence this sample was taken at, recorded so the
+-    /// chart can report a truthful time span across rate changes.
+-    pub fn sample(&mut self, interval_s: u32) {
+-        self.sensors.sample_into(&mut self.latest);
++    pub fn sample(&mut self) -> bool {
++        let now = unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() };
++        self.sample_at(now)
++    }
++
++    fn sample_at(&mut self, now: u64) -> bool {
++        // A queued WM_TIMER can survive a timer reset. Enforce the backend's
++        // minimum gap at the actual read, as well as when scheduling timers.
++        if let Some((_, last)) = self.times.time_bounds(1) {
++            if now.saturating_sub(last) < u64::from(self.sensors.min_interval_s().max(1)) * 1000 {
++                return false;
++            }
++        }
++        self.tray_dirty |= self.sensors.sample_into(&mut self.latest);
+         for (i, v) in self.latest.iter().enumerate() {
+             if let Some(h) = self.histories.get_mut(i) {
+                 h.push(*v);
+             }
+         }
+-        self.spans.push(interval_s.clamp(1, i16::MAX as u32) as i16);
++        self.times.push(now);
++        true
+     }
+ 
+     /// Which channel the tray icon is currently showing.
+@@ -112,11 +118,7 @@ impl App {
+             tip.push_str("tempmanager");
+         }
+ 
+-        (
+-            graph::format_tray(v, self.config.fahrenheit),
+-            color,
+-            tip,
+-        )
++        (graph::format_tray(v, self.config.fahrenheit), color, tip)
+     }
+ 
+     /// Index into STEPS for the configured interval, snapping to the nearest.
+@@ -138,22 +140,41 @@ impl App {
+         true
+     }
+ 
+-    /// How many samples the graph shows, and the wall-clock seconds that covers.
+-    ///
+-    /// The span is summed from the recorded per-sample intervals rather than
+-    /// assuming the current rate applied throughout.
+-    pub fn graph_window(&self) -> (usize, u32) {
+-        let window = CAPACITY.min(240);
+-        let seconds: u32 = self
+-            .spans
+-            .iter_recent(window)
+-            .filter(|s| *s != NO_VALUE)
+-            .map(|s| s.max(0) as u32)
+-            .sum();
+-        (window, seconds.max(1))
++    pub fn graph_window(&self) -> usize {
++        CAPACITY.min(240)
+     }
+ 
+     pub fn series_color(&self, i: usize) -> u32 {
+         theme::series_color(i)
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn samples_record_actual_time_and_reject_queued_early_ticks() {
++        let mut app = App {
++            config: Config::default(),
++            sensors: Sensors::test_fixture(Vec::new()),
++            histories: Vec::new(),
++            latest: Vec::new(),
++            tray_dirty: false,
++            times: History::new(),
++            popup: std::ptr::null_mut(),
++            dragging: false,
++        };
++        assert!(app.sample_at(10_000));
++        assert!(!app.sample_at(10_999));
++        assert!(app.sample_at(40_500));
++        app.config.interval_s = 1;
++        assert!(app.sample_at(41_600));
++        // A resume after a long sleep must not be recorded as a one-second gap.
++        assert!(app.sample_at(86_441_600));
++        assert_eq!(
++            app.times.iter_recent(4).collect::<Vec<_>>(),
++            [10_000, 40_500, 41_600, 86_441_600]
++        );
++    }
++}
+diff --git a/audit/original/src/config.rs b/src/config.rs
+index 364aa95..2e49025 100644
+--- a/audit/original/src/config.rs
++++ b/src/config.rs
+@@ -54,7 +54,9 @@ impl Config {
+             return c;
+         };
+         for line in text.lines() {
+-            let Some((k, v)) = line.split_once('=') else { continue };
++            let Some((k, v)) = line.split_once('=') else {
++                continue;
++            };
+             let (k, v) = (k.trim(), v.trim());
+             match k {
+                 "interval_s" => {
+diff --git a/audit/original/src/graph.rs b/src/graph.rs
+index 0605623..760cca9 100644
+--- a/audit/original/src/graph.rs
++++ b/src/graph.rs
+@@ -8,11 +8,11 @@
+ 
+ use windows_sys::Win32::Foundation::RECT;
+ use windows_sys::Win32::Graphics::Gdi::{
+-    CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush,
+-    DeleteDC, DeleteObject, DrawTextW, FillRect, LineTo, MoveToEx, SelectObject, SetBkMode,
++    CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC,
++    DeleteObject, DrawTextW, FillRect, LineTo, MoveToEx, SelectObject, SetBkMode,
+     SetStretchBltMode, SetTextColor, StretchBlt, ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS,
+-    DEFAULT_CHARSET, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL, HDC,
+-    HGDIOBJ, HALFTONE, OUT_DEFAULT_PRECIS, PS_SOLID, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
++    DEFAULT_CHARSET, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_NORMAL,
++    HALFTONE, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, PS_SOLID, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
+ };
+ 
+ use crate::history::{History, NO_VALUE};
+@@ -59,8 +59,10 @@ pub fn draw(
+     series: &[Series],
+     window: usize,
+     fahrenheit: bool,
+-    seconds_span: u32,
++    times: &History<u64>,
+ ) {
++    let (first, last) = times.time_bounds(window).unwrap_or((0, 0));
++    let seconds_span = last.saturating_sub(first) / 1000;
+     let w = area.right - area.left;
+     let h = area.bottom - area.top;
+     if w <= 0 || h <= 0 {
+@@ -79,7 +81,12 @@ pub fn draw(
+         }
+         let old_bmp = SelectObject(mem, bmp as HGDIOBJ);
+ 
+-        let full = RECT { left: 0, top: 0, right: w * SS, bottom: h * SS };
++        let full = RECT {
++            left: 0,
++            top: 0,
++            right: w * SS,
++            bottom: h * SS,
++        };
+         let bg = CreateSolidBrush(theme::BG_PANEL);
+         FillRect(mem, &full, bg);
+         DeleteObject(bg as HGDIOBJ);
+@@ -116,9 +123,7 @@ pub fn draw(
+         let plot_h = plot.bottom - plot.top;
+         let plot_w = plot.right - plot.left;
+ 
+-        let y_of = |deci: i32| -> i32 {
+-            plot.bottom - ((deci - y_lo) * plot_h) / span
+-        };
++        let y_of = |deci: i32| -> i32 { plot.bottom - ((deci - y_lo) * plot_h) / span };
+ 
+         // ---- gridlines and axis labels -------------------------------------
+         let font = CreateFontW(
+@@ -176,20 +181,15 @@ pub fn draw(
+             let pen = CreatePen(PS_SOLID, 3, s.color);
+             let old = SelectObject(mem, pen as HGDIOBJ);
+ 
+-            let n = window.min(s.history.len()).max(1);
+             let mut pen_down = false;
+-            for (i, v) in s.history.iter_recent(window).enumerate() {
++            for (v, time) in s.history.iter_recent(window).zip(times.iter_recent(window)) {
+                 if v == NO_VALUE {
+                     // Break the line so a dropped sample reads as a gap
+                     // rather than a straight interpolation across it.
+                     pen_down = false;
+                     continue;
+                 }
+-                let x = if n <= 1 {
+-                    plot.right
+-                } else {
+-                    plot.left + (i as i32 * plot_w) / (n as i32 - 1)
+-                };
++                let x = plot.left + time_x(time, first, last, plot_w);
+                 let y = y_of(v as i32).clamp(plot.top, plot.bottom);
+                 if pen_down {
+                     LineTo(mem, x, y);
+@@ -215,7 +215,7 @@ pub fn draw(
+         let wc = wide(&cap);
+         let mut cr = RECT {
+             left: plot.left,
+-            top: plot.bottom + 1 * SS,
++            top: plot.bottom + SS,
+             right: plot.right,
+             bottom: h * SS,
+         };
+@@ -262,22 +262,39 @@ pub fn draw(
+     }
+ }
+ 
++/// Milliseconds determine spacing, including timer delays and rate changes.
++fn time_x(time: u64, first: u64, last: u64, width: i32) -> i32 {
++    if last <= first {
++        return width;
++    }
++    ((time.saturating_sub(first).min(last - first) * width as u64) / (last - first)) as i32
++}
++
++fn round_div(value: i32, divisor: i32) -> i32 {
++    (value + value.signum() * (divisor / 2)) / divisor
++}
++
++fn display_value(deci_c: i16, fahrenheit: bool, decimals: bool) -> i32 {
++    // Round only once, at the displayed precision. Rounding tenths of F
++    // before rounding whole degrees would turn 47.48 F into 48 F.
++    if fahrenheit {
++        round_div(i32::from(deci_c) * 9 + 1600, if decimals { 5 } else { 50 })
++    } else {
++        round_div(i32::from(deci_c), if decimals { 1 } else { 10 })
++    }
++}
++
+ /// Format a deci-Celsius reading for display.
+ pub fn format_temp(deci_c: i16, fahrenheit: bool, decimals: bool) -> String {
+     if deci_c == NO_VALUE {
+         return "--".to_string();
+     }
+-    if fahrenheit {
+-        let f = (deci_c as i32) * 9 / 5 + 320;
++    let value = display_value(deci_c, fahrenheit, decimals);
+     if decimals {
+-            format!("{}.{}\u{00B0}", f / 10, (f % 10).abs())
++        let sign = if value < 0 { "-" } else { "" };
++        format!("{sign}{}.{}\u{00B0}", value.abs() / 10, value.abs() % 10)
+     } else {
+-            format!("{}\u{00B0}", (f + 5) / 10)
+-        }
+-    } else if decimals {
+-        format!("{}.{}\u{00B0}", deci_c / 10, (deci_c % 10).abs())
+-    } else {
+-        format!("{}\u{00B0}", (deci_c + 5) / 10)
++        format!("{value}\u{00B0}")
+     }
+ }
+ 
+@@ -286,6 +303,36 @@ pub fn format_tray(deci_c: i16, fahrenheit: bool) -> String {
+     if deci_c == NO_VALUE {
+         return "--".to_string();
+     }
+-    let v = if fahrenheit { (deci_c as i32) * 9 / 5 + 320 } else { deci_c as i32 };
+-    format!("{}", (v + 5) / 10)
++    display_value(deci_c, fahrenheit, false).to_string()
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn chart_spaces_mixed_cadences_by_elapsed_time() {
++        assert_eq!(time_x(30_000, 0, 32_000, 320), 300);
++        assert_eq!(time_x(31_000, 0, 32_000, 320), 310);
++        assert_eq!(time_x(32_000, 0, 32_000, 320), 320);
++        assert_eq!(time_x(5, 5, 5, 320), 320);
++        assert_eq!(time_x(3_600_000, 0, 3_601_000, 320), 319);
++    }
++
++    #[test]
++    fn negative_temperatures_keep_their_sign_and_round_correctly() {
++        assert_eq!(format_temp(-4, false, true), "-0.4°");
++        assert_eq!(format_temp(-55, false, false), "-6°");
++        assert_eq!(format_tray(-55, false), "-6");
++        assert_eq!(format_temp(-400, true, true), "-40.0°");
++    }
++
++    #[test]
++    fn fahrenheit_rounds_at_the_requested_precision() {
++        assert_eq!(format_temp(1, true, true), "32.2°");
++        assert_eq!(format_temp(86, true, true), "47.5°");
++        assert_eq!(format_tray(86, true), "47");
++        assert_eq!(format_temp(1000, true, true), "212.0°");
++        assert_eq!(format_temp(NO_VALUE, true, true), "--");
++    }
+ }
+diff --git a/audit/original/src/history.rs b/src/history.rs
+index 964096f..54a60dc 100644
+--- a/audit/original/src/history.rs
++++ b/src/history.rs
+@@ -3,32 +3,36 @@
+ //! Sized at compile time and allocated once at startup, so sampling never
+ //! touches the allocator and the working set never grows over uptime.
+ 
+-/// Samples retained per sensor. At the 30 s default that is ~10 hours of
+-/// history for 1.4 KB per sensor.
+-pub const CAPACITY: usize = 1200;
++/// The chart displays 240 readings (~2 hours at the 30 s default). Keeping
++/// older, undisplayed samples only wastes memory: 480 bytes per sensor suffice.
++pub const CAPACITY: usize = 240;
+ 
+ /// Sentinel for "no reading at this slot" (sensor absent or read failed).
+ pub const NO_VALUE: i16 = i16::MIN;
+ 
+ /// Temperatures are stored as tenths of a degree Celsius in an i16: enough
+-/// range for -3276.8..3276.7 C and exact for the 0.125 C steps the SMU
+-/// reports once rounded. Half the memory of f32, and no float in the buffer.
++/// range for -3276.7..3276.7 C, rounded to the nearest tenth. The timeline
++/// uses the same bounded storage with u64 millisecond timestamps.
+ #[derive(Clone)]
+-pub struct History {
+-    buf: Box<[i16; CAPACITY]>,
++pub struct History<T = i16> {
++    buf: Box<[T; CAPACITY]>,
+     /// Index the next sample will be written to.
+     head: usize,
+     /// Number of valid samples, saturating at CAPACITY.
+     len: usize,
+ }
+ 
+-impl History {
++impl<T: Copy + Default> History<T> {
+     pub fn new() -> Self {
+-        Self { buf: Box::new([NO_VALUE; CAPACITY]), head: 0, len: 0 }
++        Self {
++            buf: Box::new([T::default(); CAPACITY]),
++            head: 0,
++            len: 0,
++        }
+     }
+ 
+-    pub fn push(&mut self, deci_c: i16) {
+-        self.buf[self.head] = deci_c;
++    pub fn push(&mut self, value: T) {
++        self.buf[self.head] = value;
+         self.head = (self.head + 1) % CAPACITY;
+         if self.len < CAPACITY {
+             self.len += 1;
+@@ -44,6 +48,23 @@ impl History {
+         self.len == 0
+     }
+ 
++    /// Oldest-to-newest iterator over the last `n` samples.
++    pub fn iter_recent(&self, n: usize) -> impl DoubleEndedIterator<Item = T> + '_ {
++        let n = n.min(self.len);
++        let start = (self.head + CAPACITY - n) % CAPACITY;
++        (0..n).map(move |k| self.buf[(start + k) % CAPACITY])
++    }
++}
++
++impl History<u64> {
++    pub fn time_bounds(&self, n: usize) -> Option<(u64, u64)> {
++        let mut times = self.iter_recent(n);
++        let first = times.next()?;
++        Some((first, times.next_back().unwrap_or(first)))
++    }
++}
++
++impl History<i16> {
+     /// Most recent sample, if any and if it is a real reading.
+     #[allow(dead_code)]
+     pub fn last(&self) -> Option<i16> {
+@@ -55,13 +76,6 @@ impl History {
+         (v != NO_VALUE).then_some(v)
+     }
+ 
+-    /// Oldest-to-newest iterator over the last `n` samples.
+-    pub fn iter_recent(&self, n: usize) -> impl Iterator<Item = i16> + '_ {
+-        let n = n.min(self.len);
+-        let start = (self.head + CAPACITY - n) % CAPACITY;
+-        (0..n).map(move |k| self.buf[(start + k) % CAPACITY])
+-    }
+-
+     /// (min, max) over the last `n` real samples.
+     pub fn range_recent(&self, n: usize) -> Option<(i16, i16)> {
+         let mut lo = i16::MAX;
+@@ -72,9 +86,59 @@ impl History {
+                 continue;
+             }
+             any = true;
+-            if v < lo { lo = v; }
+-            if v > hi { hi = v; }
++            if v < lo {
++                lo = v;
++            }
++            if v > hi {
++                hi = v;
++            }
+         }
+         any.then_some((lo, hi))
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn ring_keeps_newest_samples_in_order_after_wrap() {
++        let mut h = History::<u64>::new();
++        for i in 0..CAPACITY as u64 + 7 {
++            h.push(i);
++        }
++        assert_eq!(h.len(), CAPACITY);
++        assert_eq!(h.time_bounds(CAPACITY), Some((7, CAPACITY as u64 + 6)));
++        assert_eq!(
++            h.iter_recent(3).collect::<Vec<_>>(),
++            vec![
++                CAPACITY as u64 + 4,
++                CAPACITY as u64 + 5,
++                CAPACITY as u64 + 6
++            ]
++        );
++    }
++
++    #[test]
++    fn time_bounds_do_not_invent_an_interval_before_first_sample() {
++        let mut h = History::<u64>::new();
++        assert_eq!(h.time_bounds(240), None);
++        h.push(12_000);
++        assert_eq!(h.time_bounds(240), Some((12_000, 12_000)));
++        h.push(42_750);
++        h.push(43_800);
++        assert_eq!(h.time_bounds(2), Some((42_750, 43_800)));
++    }
++
++    #[test]
++    fn temperature_range_ignores_failed_reads() {
++        let mut h = History::new();
++        h.push(NO_VALUE);
++        assert_eq!(h.range_recent(10), None);
++        h.push(-4);
++        h.push(658);
++        h.push(NO_VALUE);
++        assert_eq!(h.range_recent(10), Some((-4, 658)));
++        assert_eq!(h.last(), None);
++    }
++}
+diff --git a/audit/original/src/main.rs b/src/main.rs
+index 20359e1..a275c66 100644
+--- a/audit/original/src/main.rs
++++ b/src/main.rs
+@@ -1,13 +1,11 @@
+ //! tempmanager -- a tray temperature readout.
+ //!
+ //! Design notes on "not noticeable in the background":
+-//!   * One thread. Sampling runs on the existing message loop via a coalescable
+-//!     timer, so there is no extra stack, no scheduler pressure, and Windows is
+-//!     free to batch our wakeup with other timers already due.
+-//!   * `GetMessageW` blocks. Between samples the process is genuinely parked,
+-//!     not spinning, so it accrues no CPU time at all.
+-//!   * All buffers are allocated at startup. The sample path does no
+-//!     allocation, so the working set is flat over uptime.
++//!   * One application thread; Windows and sensor DLLs may create others.
++//!     A coalescable timer lets Windows batch background wakeups.
++//!   * `GetMessageW` blocks between messages instead of busy-polling.
++//!   * Sensor/history buffers and device paths are allocated at startup.
++//!     Display formatting and GDI work happen when readings change.
+ //!   * The chart is only drawn while the flyout is on screen.
+ 
+ #![windows_subsystem = "windows"]
+@@ -25,7 +23,6 @@ use std::sync::atomic::{AtomicIsize, Ordering};
+ 
+ use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+-use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
+ use windows_sys::Win32::System::Registry::{
+     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegSetValueExW, HKEY, HKEY_CURRENT_USER,
+     KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
+@@ -35,11 +32,11 @@ use windows_sys::Win32::UI::HiDpi::{
+ };
+ use windows_sys::Win32::UI::WindowsAndMessaging::{
+     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
+-    GetMessageW, GetWindowLongPtrW, IsWindowVisible, KillTimer, PostQuitMessage,
+-    RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+-    TrackPopupMenu, TranslateMessage, GWLP_USERDATA, HMENU, MF_CHECKED, MF_SEPARATOR, MF_STRING,
+-    MF_UNCHECKED, MSG, TPM_BOTTOMALIGN, TPM_RIGHTALIGN, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY,
+-    WM_TIMER, WNDCLASSEXW, WS_OVERLAPPED,
++    GetMessageW, GetWindowLongPtrW, IsWindowVisible, KillTimer, PostQuitMessage, RegisterClassExW,
++    RegisterWindowMessageW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, TrackPopupMenu,
++    TranslateMessage, GWLP_USERDATA, HMENU, MF_CHECKED, MF_SEPARATOR, MF_STRING, MF_UNCHECKED, MSG,
++    TPM_BOTTOMALIGN, TPM_RIGHTALIGN, WM_COMMAND, WM_CONTEXTMENU, WM_DESTROY, WM_TIMER, WNDCLASSEXW,
++    WS_OVERLAPPED,
+ };
+ 
+ use app::App;
+@@ -72,20 +69,7 @@ static TASKBAR_CREATED: AtomicIsize = AtomicIsize::new(0);
+ /// Module handle, kept so the flyout can be created lazily on first click.
+ static HINSTANCE: AtomicIsize = AtomicIsize::new(0);
+ /// Set once the flyout window class has been registered.
+-static POPUP_REGISTERED: std::sync::atomic::AtomicBool =
+-    std::sync::atomic::AtomicBool::new(false);
+-
+-/// Hand back pages we touched during startup and while the flyout was open.
+-///
+-/// A tray app spends essentially all of its life idle, so the pages behind
+-/// one-shot init work and the chart's offscreen bitmaps are pure ballast.
+-/// Trimming lets the working set fall back to what the process actually needs
+-/// while parked; the pages fault back in cheaply when the flyout reopens.
+-pub fn trim_working_set() {
+-    unsafe {
+-        SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+-    }
+-}
++static POPUP_REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+ 
+ /// Create the flyout on demand and return its handle.
+ pub fn ensure_popup(app: &mut App) -> HWND {
+@@ -138,7 +122,7 @@ fn effective_interval_s(app: &App) -> u32 {
+         // GetCPUParameters is called more than once a second.
+         app.sensors.min_interval_s().max(1)
+     } else {
+-        app.config.interval_s
++        app.config.interval_s.max(app.sensors.min_interval_s())
+     }
+ }
+ 
+@@ -186,10 +170,13 @@ extern "system" {
+ /// a file is the only way to get diagnostics out of it.
+ fn probe() {
+     let mut app = App::new();
+-    app.sample(app.config.interval_s);
++    app.sample();
+ 
+     let mut out = String::new();
+-    out.push_str(&format!("cpu backend: {}\n", app.sensors.cpu_status.message()));
++    out.push_str(&format!(
++        "cpu backend: {}\n",
++        app.sensors.cpu_status.message()
++    ));
+     if !app.sensors.cpu_source.is_empty() {
+         out.push_str(&format!("cpu source : {}\n", app.sensors.cpu_source));
+     }
+@@ -198,16 +185,23 @@ fn probe() {
+     // so re-running its init sequence while a live instance exists always
+     // fails, which would make a working setup look broken.
+     if app.sensors.cpu_status != sensors::driver::DriverStatus::Ready {
+-        out.push_str("
++        out.push_str(
++            "
+ --- ryzen sdk diagnosis ---
+-");
++",
++        );
+         out.push_str(&sensors::ryzen_sdk::diagnose());
+-        out.push_str("---
++        out.push_str(
++            "---
+ 
+-");
++",
++        );
+     }
+-    out.push_str(&format!("elevated   : {}
+-", sensors::cpu::is_elevated()));
++    out.push_str(&format!(
++        "elevated   : {}
++",
++        sensors::cpu::is_elevated()
++    ));
+ 
+     // Report the SDK's install state explicitly: "is it even there" is the
+     // first question when the CPU row is missing.
+@@ -253,7 +247,7 @@ fn shot() {
+     let hinstance = unsafe { GetModuleHandleW(std::ptr::null()) };
+ 
+     let mut app = App::new();
+-    app.sample(app.config.interval_s);
++    app.sample();
+ 
+     for step in 0..180u32 {
+         for (i, h) in app.histories.iter_mut().enumerate() {
+@@ -262,7 +256,9 @@ fn shot() {
+             let ramp = (step as i32) / 3;
+             h.push((base + wave + ramp) as i16);
+         }
+-        app.spans.push(app.config.interval_s as i16);
++        let last = app.times.time_bounds(1).map(|(_, t)| t).unwrap_or(0);
++        app.times
++            .push(last + u64::from(app.config.interval_s) * 1000);
+     }
+     for (i, h) in app.histories.iter().enumerate() {
+         if let Some(v) = h.range_recent(240) {
+@@ -273,7 +269,7 @@ fn shot() {
+     let path = std::env::current_exe()
+         .map(|p| p.with_file_name("popup.bmp"))
+         .unwrap_or_else(|_| std::path::PathBuf::from("popup.bmp"));
+-    popup::render_to_file(hinstance, &app, &path.to_string_lossy());
++    popup::render_to_file(hinstance, &mut app, &path.to_string_lossy());
+ }
+ 
+ fn main() {
+@@ -353,18 +349,16 @@ fn main() {
+ 
+     // Prime the display immediately rather than showing "--" until the first
+     // interval elapses.
+-    app.sample(app.config.interval_s);
++    app.sample();
+     let (text, color, tip) = app.tray_display();
+     tray.update(&text, color, &tip);
++    app.tray_dirty = false;
+ 
+     // Stash the tray so the window proc can reach it.
+     TRAY.with(|t| *t.borrow_mut() = Some(tray));
+ 
+     reschedule(hwnd);
+ 
+-    // Startup is the peak of this process's memory use; give it back.
+-    trim_working_set();
+-
+     let mut msg: MSG = unsafe { std::mem::zeroed() };
+     unsafe {
+         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+@@ -377,16 +371,17 @@ fn main() {
+ }
+ 
+ thread_local! {
+-    static TRAY: std::cell::RefCell<Option<tray::Tray>> = std::cell::RefCell::new(None);
++    static TRAY: std::cell::RefCell<Option<tray::Tray>> = const { std::cell::RefCell::new(None) };
+ }
+ 
+-fn refresh_tray(app: &App) {
++fn refresh_tray(app: &mut App) {
+     let (text, color, tip) = app.tray_display();
+     TRAY.with(|t| {
+         if let Some(tray) = t.borrow_mut().as_mut() {
+             tray.update(&text, color, &tip);
+         }
+     });
++    app.tray_dirty = false;
+ }
+ 
+ unsafe extern "system" fn main_proc(
+@@ -413,16 +408,15 @@ unsafe extern "system" fn main_proc(
+ 
+     match msg {
+         WM_TIMER if wparam == TIMER_ID => {
+-            let interval = effective_interval_s(app);
+-            app.sample(interval);
++            if !app.sample() {
++                return 0;
++            }
++            if app.tray_dirty {
+                 refresh_tray(app);
++            }
+             // Only repaint the flyout if it is actually on screen.
+             if !app.popup.is_null() && IsWindowVisible(app.popup) != 0 {
+-                windows_sys::Win32::Graphics::Gdi::InvalidateRect(
+-                    app.popup,
+-                    std::ptr::null(),
+-                    0,
+-                );
++                windows_sys::Win32::Graphics::Gdi::InvalidateRect(app.popup, std::ptr::null(), 0);
+             }
+             0
+         }
+@@ -451,7 +445,7 @@ unsafe extern "system" fn main_proc(
+         }
+ 
+         WM_COMMAND => {
+-            let id = (wparam & 0xFFFF) as usize;
++            let id = wparam & 0xFFFF;
+             match id {
+                 ID_HOTTEST => app.config.tray_source = TraySource::HottestOverall,
+                 ID_CPU => app.config.tray_source = TraySource::Cpu,
+@@ -474,11 +468,7 @@ unsafe extern "system" fn main_proc(
+             app.config.save();
+             refresh_tray(app);
+             if IsWindowVisible(app.popup) != 0 {
+-                windows_sys::Win32::Graphics::Gdi::InvalidateRect(
+-                    app.popup,
+-                    std::ptr::null(),
+-                    0,
+-                );
++                windows_sys::Win32::Graphics::Gdi::InvalidateRect(app.popup, std::ptr::null(), 0);
+             }
+             0
+         }
+@@ -538,7 +528,9 @@ unsafe fn show_menu(hwnd: HWND, app: &App, pt: POINT) {
+         wide("Start with Windows").as_ptr(),
+     );
+     // Only worth offering when it would actually change what we can read.
+-    if !sensors::cpu::is_elevated() && app.sensors.cpu_status != sensors::driver::DriverStatus::Ready {
++    if !sensors::cpu::is_elevated()
++        && app.sensors.cpu_status != sensors::driver::DriverStatus::Ready
++    {
+         AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+         AppendMenuW(
+             menu,
+@@ -571,7 +563,9 @@ unsafe fn show_menu(hwnd: HWND, app: &App, pt: POINT) {
+ /// temperature means running with an elevated token. There is no way around
+ /// that from user mode.
+ fn restart_elevated() {
+-    let Ok(exe) = std::env::current_exe() else { return };
++    let Ok(exe) = std::env::current_exe() else {
++        return;
++    };
+     let verb = wide("runas");
+     let path = wide(&exe.to_string_lossy());
+     let rc = unsafe {
+@@ -615,11 +609,15 @@ fn set_autostart_task(enabled: bool) -> bool {
+     if !enabled {
+         return run_hidden("schtasks", &["/delete", "/tn", TASK_NAME, "/f"]);
+     }
+-    let Ok(exe) = std::env::current_exe() else { return false };
++    let Ok(exe) = std::env::current_exe() else {
++        return false;
++    };
+     let target = format!("\"{}\"", exe.to_string_lossy());
+     run_hidden(
+         "schtasks",
+-        &["/create", "/tn", TASK_NAME, "/tr", &target, "/sc", "onlogon", "/rl", "highest", "/f"],
++        &[
++            "/create", "/tn", TASK_NAME, "/tr", &target, "/sc", "onlogon", "/rl", "highest", "/f",
++        ],
+     )
+ }
+ 
+@@ -634,7 +632,9 @@ fn set_autostart(enabled: bool) {
+ }
+ 
+ fn set_autostart_run_key(enabled: bool) {
+-    let Ok(exe) = std::env::current_exe() else { return };
++    let Ok(exe) = std::env::current_exe() else {
++        return;
++    };
+     let subkey = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+     let name = wide("tempmanager");
+ 
+diff --git a/audit/original/src/popup.rs b/src/popup.rs
+index d0d90e1..714564c 100644
+--- a/audit/original/src/popup.rs
++++ b/src/popup.rs
+@@ -11,8 +11,8 @@ use windows_sys::Win32::Graphics::Dwm::{
+ };
+ use windows_sys::Win32::Graphics::Gdi::{
+     BeginPaint, BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen,
+-    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, InvalidateRect,
+-    SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY,
++    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GdiFlush,
++    InvalidateRect, SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY,
+     CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_VCENTER,
+     FF_DONTCARE, FW_BOLD, FW_NORMAL, FW_SEMIBOLD, HDC, HGDIOBJ, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+     PS_SOLID, SRCCOPY, TRANSPARENT, VARIABLE_PITCH,
+@@ -20,14 +20,12 @@ use windows_sys::Win32::Graphics::Gdi::{
+ use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
+ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+ use windows_sys::Win32::UI::WindowsAndMessaging::{
+-    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, LoadCursorW,
++    CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindowLongPtrW, LoadCursorW,
+     RegisterClassExW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+     SystemParametersInfoW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW,
+-    SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WM_ACTIVATE,
+-    WM_DESTROY,
+-    WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_PRINTCLIENT,
+-    WNDCLASSEXW,
+-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WA_INACTIVE,
++    SPI_GETWORKAREA, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOWNA, WA_INACTIVE,
++    WM_ACTIVATE, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
++    WM_PRINTCLIENT, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+ };
+ 
+ use crate::app::{App, STEPS};
+@@ -56,7 +54,9 @@ struct Metrics {
+ impl Metrics {
+     fn for_window(hwnd: HWND) -> Self {
+         let dpi = unsafe { GetDpiForWindow(hwnd) };
+-        Self { scale: if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 } }
++        Self {
++            scale: if dpi == 0 { 1.0 } else { dpi as f32 / 96.0 },
++        }
+     }
+     fn s(&self, v: i32) -> i32 {
+         (v as f32 * self.scale).round() as i32
+@@ -160,15 +160,13 @@ pub fn show_at_cursor(hwnd: HWND, app: &App, cursor: POINT) {
+ 
+     let (w, h) = window_size(app, hwnd);
+ 
+-    let mut work = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+-    unsafe {
+-        SystemParametersInfoW(
+-            SPI_GETWORKAREA,
+-            0,
+-            &mut work as *mut _ as *mut c_void,
+-            0,
+-        )
++    let mut work = RECT {
++        left: 0,
++        top: 0,
++        right: 0,
++        bottom: 0,
+     };
++    unsafe { SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut work as *mut _ as *mut c_void, 0) };
+ 
+     let margin = 8;
+     let mut x = cursor.x - w / 2;
+@@ -178,8 +176,14 @@ pub fn show_at_cursor(hwnd: HWND, app: &App, cursor: POINT) {
+     if y < work.top {
+         y = cursor.y + margin;
+     }
+-    x = x.clamp(work.left + margin, (work.right - w - margin).max(work.left + margin));
+-    y = y.clamp(work.top + margin, (work.bottom - h - margin).max(work.top + margin));
++    x = x.clamp(
++        work.left + margin,
++        (work.right - w - margin).max(work.left + margin),
++    );
++    y = y.clamp(
++        work.top + margin,
++        (work.bottom - h - margin).max(work.top + margin),
++    );
+ 
+     unsafe {
+         SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
+@@ -259,9 +263,6 @@ unsafe extern "system" fn popup_proc(
+         WM_ACTIVATE => {
+             if (wparam & 0xFFFF) as u32 == WA_INACTIVE {
+                 hide(hwnd);
+-                // The chart's offscreen bitmaps and font objects are done with
+-                // until the flyout is opened again.
+-                crate::trim_working_set();
+             }
+             0
+         }
+@@ -269,7 +270,12 @@ unsafe extern "system" fn popup_proc(
+         WM_LBUTTONDOWN => {
+             let x = (lparam & 0xFFFF) as i16 as i32;
+             let y = ((lparam >> 16) & 0xFFFF) as i16 as i32;
+-            let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
++            let mut client = RECT {
++                left: 0,
++                top: 0,
++                right: 0,
++                bottom: 0,
++            };
+             windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+             let m = Metrics::for_window(hwnd);
+             let track = slider_track(app, &m, &client);
+@@ -291,7 +297,12 @@ unsafe extern "system" fn popup_proc(
+         WM_MOUSEMOVE => {
+             if app.dragging {
+                 let x = (lparam & 0xFFFF) as i16 as i32;
+-                let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
++                let mut client = RECT {
++                    left: 0,
++                    top: 0,
++                    right: 0,
++                    bottom: 0,
++                };
+                 windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+                 let m = Metrics::for_window(hwnd);
+                 let track = slider_track(app, &m, &client);
+@@ -323,25 +334,42 @@ unsafe extern "system" fn popup_proc(
+ /// check layout without needing a human to look at the screen.
+ pub fn render_to_file(
+     hinstance: windows_sys::Win32::Foundation::HMODULE,
+-    app: &App,
++    app: &mut App,
+     path: &str,
+ ) {
+     unsafe {
+         register(hinstance);
+-        let hwnd = create(hinstance, std::ptr::null_mut(), app as *const App as *mut App);
++        let hwnd = create(hinstance, std::ptr::null_mut(), app as *mut App);
+         if hwnd.is_null() {
+             return;
+         }
+         let (w, h) = window_size(app, hwnd);
+-        SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, w, h, SWP_NOACTIVATE | SWP_NOZORDER);
++        SetWindowPos(
++            hwnd,
++            std::ptr::null_mut(),
++            0,
++            0,
++            w,
++            h,
++            SWP_NOACTIVATE | SWP_NOZORDER,
++        );
+ 
+-        let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
++        let mut client = RECT {
++            left: 0,
++            top: 0,
++            right: 0,
++            bottom: 0,
++        };
+         windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+         let (cw, chh) = (client.right, client.bottom);
+ 
+         let screen = windows_sys::Win32::Graphics::Gdi::GetDC(std::ptr::null_mut());
+         let dc = CreateCompatibleDC(screen);
+         windows_sys::Win32::Graphics::Gdi::ReleaseDC(std::ptr::null_mut(), screen);
++        if dc.is_null() {
++            DestroyWindow(hwnd);
++            return;
++        }
+ 
+         let mut info: windows_sys::Win32::Graphics::Gdi::BITMAPINFO = std::mem::zeroed();
+         info.bmiHeader = windows_sys::Win32::Graphics::Gdi::BITMAPINFOHEADER {
+@@ -367,9 +395,18 @@ pub fn render_to_file(
+             std::ptr::null_mut(),
+             0,
+         );
++        if dib.is_null() || bits.is_null() {
++            if !dib.is_null() {
++                DeleteObject(dib as HGDIOBJ);
++            }
++            DeleteDC(dc);
++            DestroyWindow(hwnd);
++            return;
++        }
+         let old = SelectObject(dc, dib as HGDIOBJ);
+ 
+         paint(hwnd, dc, app);
++        GdiFlush();
+ 
+         let count = (cw * chh) as usize;
+         let px = std::slice::from_raw_parts_mut(bits as *mut u32, count);
+@@ -398,11 +435,17 @@ pub fn render_to_file(
+         SelectObject(dc, old);
+         DeleteObject(dib as HGDIOBJ);
+         DeleteDC(dc);
++        DestroyWindow(hwnd);
+     }
+ }
+ 
+ unsafe fn paint(hwnd: HWND, target: HDC, app: &App) {
+-    let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
++    let mut client = RECT {
++        left: 0,
++        top: 0,
++        right: 0,
++        bottom: 0,
++    };
+     windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect(hwnd, &mut client);
+     let (cw, ch) = (client.right, client.bottom);
+     if cw <= 0 || ch <= 0 {
+@@ -413,7 +456,14 @@ unsafe fn paint(hwnd: HWND, target: HDC, app: &App) {
+ 
+     // Double buffer: the chart and the rows would otherwise tear visibly.
+     let mem = CreateCompatibleDC(target);
++    if mem.is_null() {
++        return;
++    }
+     let bmp = CreateCompatibleBitmap(target, cw, ch);
++    if bmp.is_null() {
++        DeleteDC(mem);
++        return;
++    }
+     let old_bmp = SelectObject(mem, bmp as HGDIOBJ);
+ 
+     let bg = CreateSolidBrush(theme::BG);
+@@ -429,32 +479,47 @@ unsafe fn paint(hwnd: HWND, target: HDC, app: &App) {
+ 
+     // ---- header -----------------------------------------------------------
+     let mut y = m.s(PAD);
+-    SelectObject(mem, font_head as HGDIOBJ);
++    let old_font = SelectObject(mem, font_head as HGDIOBJ);
+     SetTextColor(mem, theme::TEXT);
+-    draw_text(mem, "Temperatures", &RECT {
++    draw_text(
++        mem,
++        "Temperatures",
++        &RECT {
+             left: m.s(PAD),
+             top: y,
+             right: cw - m.s(PAD),
+             bottom: y + m.s(HEADER_H),
+-    }, DT_LEFT);
++        },
++        DT_LEFT,
++    );
+ 
+     // Surface why the CPU is missing instead of silently omitting the row.
+     if app.sensors.cpu_status != crate::sensors::driver::DriverStatus::Ready {
+         SelectObject(mem, font_small as HGDIOBJ);
+         SetTextColor(mem, theme::WARN);
+-        draw_text(mem, app.sensors.cpu_status.message(), &RECT {
++        draw_text(
++            mem,
++            app.sensors.cpu_status.message(),
++            &RECT {
+                 left: m.s(PAD),
+                 top: y,
+                 right: cw - m.s(PAD),
+                 bottom: y + m.s(HEADER_H),
+-        }, DT_RIGHT);
++            },
++            DT_RIGHT,
++        );
+     }
+     y += m.s(HEADER_H);
+ 
+     // ---- one row per channel ----------------------------------------------
+     for (i, chan) in app.sensors.channels.iter().enumerate() {
+         let v = app.latest.get(i).copied().unwrap_or(NO_VALUE);
+-        let row = RECT { left: m.s(PAD), top: y, right: cw - m.s(PAD), bottom: y + m.s(ROW_H) };
++        let row = RECT {
++            left: m.s(PAD),
++            top: y,
++            right: cw - m.s(PAD),
++            bottom: y + m.s(ROW_H),
++        };
+ 
+         // Series swatch, matching the trace colour in the chart below.
+         let dot = app.series_color(i);
+@@ -472,7 +537,10 @@ unsafe fn paint(hwnd: HWND, target: HDC, app: &App) {
+ 
+         SelectObject(mem, font_label as HGDIOBJ);
+         SetTextColor(mem, theme::TEXT);
+-        let label_rect = RECT { left: row.left + m.s(16), ..row };
++        let label_rect = RECT {
++            left: row.left + m.s(16),
++            ..row
++        };
+         draw_text(mem, &chan.label, &label_rect, DT_LEFT);
+ 
+         SelectObject(mem, font_value as HGDIOBJ);
+@@ -507,14 +575,24 @@ unsafe fn paint(hwnd: HWND, target: HDC, app: &App) {
+     FillRect(mem, &plot, panel);
+     DeleteObject(panel as HGDIOBJ);
+ 
+-    let (window, span_s) = app.graph_window();
++    let window = app.graph_window();
+     let series: Vec<Series> = app
+         .histories
+         .iter()
+         .enumerate()
+-        .map(|(i, h)| Series { history: h, color: app.series_color(i) })
++        .map(|(i, h)| Series {
++            history: h,
++            color: app.series_color(i),
++        })
+         .collect();
+-    graph::draw(mem, &plot, &series, window, app.config.fahrenheit, span_s);
++    graph::draw(
++        mem,
++        &plot,
++        &series,
++        window,
++        app.config.fahrenheit,
++        &app.times,
++    );
+ 
+     y = plot.bottom + m.s(4);
+ 
+@@ -529,7 +607,12 @@ unsafe fn paint(hwnd: HWND, target: HDC, app: &App) {
+     draw_text(
+         mem,
+         "Every",
+-        &RECT { left: m.s(PAD), top: cy - m.s(9), right: track.left, bottom: cy + m.s(9) },
++        &RECT {
++            left: m.s(PAD),
++            top: cy - m.s(9),
++            right: track.left,
++            bottom: cy + m.s(9),
++        },
+         DT_LEFT,
+     );
+ 
+@@ -539,7 +622,10 @@ unsafe fn paint(hwnd: HWND, target: HDC, app: &App) {
+     DeleteObject(rest as HGDIOBJ);
+ 
+     // Filled part up to the thumb.
+-    let filled = RECT { right: thumb_x, ..track };
++    let filled = RECT {
++        right: thumb_x,
++        ..track
++    };
+     let fill = CreateSolidBrush(theme::SERIES[0]);
+     FillRect(mem, &filled, fill);
+     DeleteObject(fill as HGDIOBJ);
+@@ -557,7 +643,7 @@ unsafe fn paint(hwnd: HWND, target: HDC, app: &App) {
+ 
+     SetTextColor(mem, theme::TEXT);
+     let secs = app.config.interval_s;
+-    let label = if secs >= 60 && secs % 60 == 0 {
++    let label = if secs >= 60 && secs.is_multiple_of(60) {
+         format!("{} min", secs / 60)
+     } else {
+         format!("{secs}s")
+@@ -565,7 +651,12 @@ unsafe fn paint(hwnd: HWND, target: HDC, app: &App) {
+     draw_text(
+         mem,
+         &label,
+-        &RECT { left: track.right + m.s(8), top: cy - m.s(9), right: cw - m.s(PAD), bottom: cy + m.s(9) },
++        &RECT {
++            left: track.right + m.s(8),
++            top: cy - m.s(9),
++            right: cw - m.s(PAD),
++            bottom: cy + m.s(9),
++        },
+         DT_RIGHT,
+     );
+ 
+@@ -573,6 +664,8 @@ unsafe fn paint(hwnd: HWND, target: HDC, app: &App) {
+ 
+     BitBlt(target, 0, 0, cw, ch, mem, 0, 0, SRCCOPY);
+ 
++    // DeleteObject cannot release a font while it is selected into this DC.
++    SelectObject(mem, old_font);
+     for f in [font_label, font_value, font_head, font_small] {
+         DeleteObject(f as HGDIOBJ);
+     }
+@@ -613,3 +706,78 @@ unsafe fn draw_text(hdc: HDC, text: &str, rect: &RECT, align: u32) {
+         align | DT_SINGLELINE | DT_VCENTER,
+     );
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::history::History;
++    use crate::sensors::{Channel, Kind, Sensors};
++
++    #[test]
++    #[ignore = "creates an offscreen Win32 window; run explicitly on Windows"]
++    fn repeated_paint_releases_gdi_objects() {
++        use windows_sys::Win32::Graphics::Gdi::{GetDC, ReleaseDC};
++        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetGuiResources};
++
++        let mut history = History::new();
++        let mut times = History::<u64>::new();
++        for i in 0..240 {
++            history.push(500 + (i % 100) as i16);
++            times.push(i * 1000);
++        }
++        let mut app = App {
++            config: crate::config::Config::default(),
++            sensors: Sensors::test_fixture(vec![Channel {
++                label: "Test CPU".into(),
++                kind: Kind::Cpu,
++                warn: 750,
++                hot: 900,
++            }]),
++            histories: vec![history],
++            latest: vec![650],
++            tray_dirty: false,
++            times,
++            popup: std::ptr::null_mut(),
++            dragging: false,
++        };
++        unsafe {
++            let instance =
++                windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(std::ptr::null());
++            register(instance);
++            let hwnd = create(instance, std::ptr::null_mut(), &mut app);
++            assert!(!hwnd.is_null());
++            let (w, h) = window_size(&app, hwnd);
++            SetWindowPos(
++                hwnd,
++                std::ptr::null_mut(),
++                0,
++                0,
++                w,
++                h,
++                SWP_NOACTIVATE | SWP_NOZORDER,
++            );
++            let screen = GetDC(std::ptr::null_mut());
++            let dc = CreateCompatibleDC(screen);
++            let bitmap = CreateCompatibleBitmap(screen, w, h);
++            ReleaseDC(std::ptr::null_mut(), screen);
++            assert!(!dc.is_null() && !bitmap.is_null());
++            let old = SelectObject(dc, bitmap as HGDIOBJ);
++            paint(hwnd, dc, &app);
++            GdiFlush();
++            let before = GetGuiResources(GetCurrentProcess(), 0);
++            let start = std::time::Instant::now();
++            for _ in 0..200 {
++                paint(hwnd, dc, &app);
++            }
++            GdiFlush();
++            let after = GetGuiResources(GetCurrentProcess(), 0);
++            let elapsed = start.elapsed();
++            SelectObject(dc, old);
++            DeleteObject(bitmap as HGDIOBJ);
++            DeleteDC(dc);
++            DestroyWindow(hwnd);
++            eprintln!("200 paints: {elapsed:?}; GDI objects {before} -> {after}");
++            assert_eq!(after, before, "GDI objects grew over repeated paints");
++        }
++    }
++}
+diff --git a/audit/original/src/sensors/amd.rs b/src/sensors/amd.rs
+index a32f490..e0f9055 100644
+--- a/audit/original/src/sensors/amd.rs
++++ b/src/sensors/amd.rs
+@@ -52,7 +52,8 @@ pub fn detect() -> Option<CpuLayout> {
+     };
+ 
+     // Zen 1 / Zen+ reported Tctl with a built-in offset above Tdie.
+-    let tctl_offset_deci_c = if brand.contains("1600X") || brand.contains("1700X") || brand.contains("1800X") {
++    let tctl_offset_deci_c =
++        if brand.contains("1600X") || brand.contains("1700X") || brand.contains("1800X") {
+             -200
+         } else if brand.contains("Threadripper 19") || brand.contains("Threadripper 29") {
+             -270
+@@ -62,7 +63,12 @@ pub fn detect() -> Option<CpuLayout> {
+             0
+         };
+ 
+-    Some(CpuLayout { ccd_offset, ccd_count, tctl_offset_deci_c, brand })
++    Some(CpuLayout {
++        ccd_offset,
++        ccd_count,
++        tctl_offset_deci_c,
++        brand,
++    })
+ }
+ 
+ impl CpuLayout {
+@@ -95,7 +101,9 @@ impl CpuLayout {
+         out.clear();
+         for i in 0..self.ccd_count {
+             let addr = ZEN_REPORTED_TEMP_CTRL_BASE + self.ccd_offset + i * 4;
+-            let Some(regval) = drv.read_smn(addr) else { continue };
++            let Some(regval) = drv.read_smn(addr) else {
++                continue;
++            };
+             if regval == u32::MAX || (regval & ZEN_CCD_TEMP_VALID) == 0 {
+                 continue;
+             }
+@@ -109,7 +117,11 @@ impl CpuLayout {
+ 
+ fn round_milli_to_deci(milli: i32) -> i16 {
+     // Round half away from zero so 26.75 C reads 26.8, not 26.7.
+-    let r = if milli >= 0 { (milli + 50) / 100 } else { (milli - 50) / 100 };
++    let r = if milli >= 0 {
++        (milli + 50) / 100
++    } else {
++        (milli - 50) / 100
++    };
+     r as i16
+ }
+ 
+@@ -157,7 +169,10 @@ fn cpuid_identity() -> Option<(u32, u32, String)> {
+ fn brand_string() -> String {
+     use std::arch::x86_64::__cpuid;
+     let mut bytes = [0u8; 48];
+-    for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004].iter().enumerate() {
++    for (i, leaf) in [0x8000_0002u32, 0x8000_0003, 0x8000_0004]
++        .iter()
++        .enumerate()
++    {
+         let r = __cpuid(*leaf);
+         let base = i * 16;
+         bytes[base..base + 4].copy_from_slice(&r.eax.to_le_bytes());
+diff --git a/audit/original/src/sensors/cpu.rs b/src/sensors/cpu.rs
+index b6eb8c4..4be4798 100644
+--- a/audit/original/src/sensors/cpu.rs
++++ b/src/sensors/cpu.rs
+@@ -1,7 +1,7 @@
+ //! CPU temperature backends.
+ //!
+ //! There is more than one way to get a die temperature out of a Ryzen, and
+-//! they differ in what they cost the user rather than in what they report:
++//! each exposes a backend-specific package reading:
+ //!
+ //!   * `WinRing0Backend` talks to the SMU directly through a generic ring-0
+ //!     driver. Self-contained, but the driver is on Microsoft's
+@@ -10,8 +10,8 @@
+ //!     loads happily under HVCI, at the cost of depending on AMD software
+ //!     being installed.
+ //!
+-//! Both produce the same numbers, so the rest of the app should not care which
+-//! one is live. This trait is where that indifference lives.
++//! Both return Celsius, but the SDK's temperature and the SMU Tdie reading
++//! need not have identical sampling/averaging semantics.
+ 
+ use super::driver::{Driver, DriverStatus};
+ 
+@@ -26,7 +26,9 @@ pub trait CpuBackend {
+     ///
+     /// Backends that cannot break the package down leave `out` empty; callers
+     /// treat that as "one channel only" rather than an error.
+-    fn read_ccds(&mut self, _out: &mut Vec<(u32, i16)>) {}
++    fn read_ccds(&mut self, out: &mut Vec<(u32, i16)>) {
++        out.clear();
++    }
+ 
+     /// Which backend this is, for the flyout's status line.
+     fn source_name(&self) -> &'static str;
+@@ -70,7 +72,9 @@ pub fn open() -> Result<Box<dyn CpuBackend>, DriverStatus> {
+ /// Whether this process is running with an elevated token.
+ pub fn is_elevated() -> bool {
+     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+-    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
++    use windows_sys::Win32::Security::{
++        GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY,
++    };
+     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+ 
+     unsafe {
+diff --git a/audit/original/src/sensors/driver.rs b/src/sensors/driver.rs
+index d27b0e9..55b0b37 100644
+--- a/audit/original/src/sensors/driver.rs
++++ b/src/sensors/driver.rs
+@@ -13,7 +13,7 @@
+ //! See SETUP.md.
+ 
+ use std::ffi::c_void;
+-use std::path::PathBuf;
++use std::path::{Path, PathBuf};
+ use windows_sys::Win32::Foundation::{
+     CloseHandle, GetLastError, ERROR_SERVICE_EXISTS, GENERIC_READ, GENERIC_WRITE, HANDLE,
+     INVALID_HANDLE_VALUE,
+@@ -73,7 +73,7 @@ impl DriverStatus {
+             DriverStatus::Ready => "ready",
+             DriverStatus::NotInstalled => "driver not installed - see SETUP.md",
+             DriverStatus::NeedsElevation => "run as administrator for CPU temps",
+-            DriverStatus::Blocked => "driver blocked - Memory Integrity is on",
++            DriverStatus::Blocked => "CPU driver unavailable - see SETUP.md",
+             DriverStatus::Unsupported => "no supported CPU sensor",
+         }
+     }
+@@ -83,8 +83,6 @@ pub struct Driver {
+     handle: HANDLE,
+ }
+ 
+-unsafe impl Send for Driver {}
+-
+ fn wide(s: &str) -> Vec<u16> {
+     s.encode_utf16().chain(std::iter::once(0)).collect()
+ }
+@@ -122,7 +120,7 @@ impl Driver {
+         let h = unsafe {
+             CreateFileW(
+                 path.as_ptr(),
+-                (GENERIC_READ | GENERIC_WRITE) as u32,
++                GENERIC_READ | GENERIC_WRITE,
+                 FILE_SHARE_READ | FILE_SHARE_WRITE,
+                 std::ptr::null(),
+                 OPEN_EXISTING,
+@@ -133,7 +131,7 @@ impl Driver {
+         (h != INVALID_HANDLE_VALUE && !h.is_null()).then_some(h)
+     }
+ 
+-    fn install_and_start(sys: &PathBuf) -> Result<(), DriverStatus> {
++    fn install_and_start(sys: &Path) -> Result<(), DriverStatus> {
+         let scm =
+             unsafe { OpenSCManagerW(std::ptr::null(), std::ptr::null(), SC_MANAGER_ALL_ACCESS) };
+         if scm.is_null() {
+@@ -205,11 +203,15 @@ impl Driver {
+                 &mut returned,
+                 std::ptr::null_mut(),
+             ) != 0
++                && (out_len == 0 || returned == out_len)
+         }
+     }
+ 
+     fn read_pci_dword(&self, pci_address: u32, offset: u32) -> Option<u32> {
+-        let input = ReadPciInput { pci_address, pci_offset: offset };
++        let input = ReadPciInput {
++            pci_address,
++            pci_offset: offset,
++        };
+         let mut value: u32 = 0;
+         self.ioctl(
+             IOCTL_READ_PCI_CONFIG,
+@@ -222,7 +224,11 @@ impl Driver {
+     }
+ 
+     fn write_pci_dword(&self, pci_address: u32, offset: u32, value: u32) -> bool {
+-        let input = WritePciInput { pci_address, pci_offset: offset, value };
++        let input = WritePciInput {
++            pci_address,
++            pci_offset: offset,
++            value,
++        };
+         self.ioctl(
+             IOCTL_WRITE_PCI_CONFIG,
+             &input as *const _ as *const c_void,
+diff --git a/audit/original/src/sensors/mod.rs b/src/sensors/mod.rs
+index 82f896d..c42803c 100644
+--- a/audit/original/src/sensors/mod.rs
++++ b/src/sensors/mod.rs
+@@ -41,12 +41,30 @@ pub struct Sensors {
+     drives: Vec<storage::Drive>,
+     /// Reused between samples so reading CCDs allocates nothing.
+     ccd_scratch: Vec<(u32, i16)>,
++    /// Stable CCD identities, even if one read temporarily fails.
++    ccd_ids: Vec<u32>,
+     /// Number of leading channels that come from the CPU.
+     cpu_channels: usize,
+     gpu_channels: usize,
+ }
+ 
+ impl Sensors {
++    #[cfg(test)]
++    pub(crate) fn test_fixture(channels: Vec<Channel>) -> Self {
++        Self {
++            channels,
++            cpu_status: DriverStatus::Ready,
++            cpu_source: "test",
++            cpu: None,
++            nvml: None,
++            drives: Vec::new(),
++            ccd_scratch: Vec::with_capacity(16),
++            ccd_ids: Vec::new(),
++            cpu_channels: 0,
++            gpu_channels: 0,
++        }
++    }
++
+     pub fn probe() -> Self {
+         let mut channels = Vec::new();
+ 
+@@ -59,7 +77,8 @@ impl Sensors {
+             Err(status) => (None, status, ""),
+         };
+ 
+-        let mut ccd_scratch = Vec::new();
++        let mut ccd_scratch = Vec::with_capacity(16);
++        let mut ccd_ids = Vec::new();
+         let mut cpu_channels = 0;
+ 
+         if let Some(backend) = cpu.as_mut() {
+@@ -76,6 +95,7 @@ impl Sensors {
+             backend.read_ccds(&mut ccd_scratch);
+             if ccd_scratch.len() > 1 {
+                 for (i, _) in &ccd_scratch {
++                    ccd_ids.push(*i);
+                     channels.push(Channel {
+                         label: format!("CCD{i}"),
+                         kind: Kind::Cpu,
+@@ -121,6 +141,7 @@ impl Sensors {
+             nvml,
+             drives,
+             ccd_scratch,
++            ccd_ids,
+             cpu_channels,
+             gpu_channels,
+         }
+@@ -129,43 +150,54 @@ impl Sensors {
+     /// Fill `out` with one reading per channel, in channel order.
+     /// Failed reads become `NO_VALUE` so the graph shows a gap rather than a
+     /// stale value held over from the previous sample.
+-    pub fn sample_into(&mut self, out: &mut Vec<i16>) {
+-        out.clear();
++    /// Returns whether any displayed value changed. The caller owns a fixed
++    /// slice, so no read can grow its allocation.
++    pub fn sample_into(&mut self, out: &mut [i16]) -> bool {
++        assert_eq!(out.len(), self.channels.len());
++        let mut slot = 0;
++        let mut changed = false;
++        let mut put = |value| {
++            changed |= out[slot] != value;
++            out[slot] = value;
++            slot += 1;
++        };
+ 
+         if let Some(backend) = self.cpu.as_mut() {
+-            out.push(backend.read_package().unwrap_or(NO_VALUE));
++            put(backend.read_package().unwrap_or(NO_VALUE));
+ 
+             if self.cpu_channels > 1 {
+                 backend.read_ccds(&mut self.ccd_scratch);
+                 // cpu_channels is 1 package + N CCDs fixed at probe time.
+-                for slot in 0..self.cpu_channels - 1 {
++                for id in &self.ccd_ids {
+                     let v = self
+                         .ccd_scratch
+-                        .get(slot)
++                        .iter()
++                        .find(|(i, _)| i == id)
+                         .map(|(_, t)| *t)
+                         .unwrap_or(NO_VALUE);
+-                    out.push(v);
++                    put(v);
+                 }
+             }
+         }
+ 
+         if let Some(n) = self.nvml.as_ref() {
+             for i in 0..self.gpu_channels {
+-                out.push(n.read(i).map(|c| c * 10).unwrap_or(NO_VALUE));
++                put(n.read(i).unwrap_or(NO_VALUE));
+             }
+         }
+ 
+         for d in &self.drives {
+-            out.push(d.read().unwrap_or(NO_VALUE));
++            put(d.read().unwrap_or(NO_VALUE));
+         }
+ 
+-        debug_assert_eq!(out.len(), self.channels.len());
++        debug_assert_eq!(slot, self.channels.len());
++        changed
+     }
+ 
+     /// Shortest sampling interval any live backend is willing to sustain.
+     pub fn min_interval_s(&self) -> u32 {
+         let ms = self.cpu.as_ref().map(|c| c.min_interval_ms()).unwrap_or(0);
+-        (ms + 999) / 1000
++        ms.div_ceil(1000)
+     }
+ 
+     /// Index of the channel the tray icon should track for "hottest".
+@@ -182,3 +214,57 @@ impl Sensors {
+         self.channels.iter().position(|c| c.kind == kind)
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    struct IntermittentCpu {
++        sample: usize,
++    }
++
++    impl CpuBackend for IntermittentCpu {
++        fn label(&self) -> String {
++            "test CPU".into()
++        }
++        fn source_name(&self) -> &'static str {
++            "test"
++        }
++        fn read_package(&mut self) -> Option<i16> {
++            Some(800)
++        }
++        fn read_ccds(&mut self, out: &mut Vec<(u32, i16)>) {
++            out.clear();
++            match self.sample {
++                0 => out.extend_from_slice(&[(0, 510), (2, 720)]),
++                1 => out.push((2, 730)),
++                _ => out.extend_from_slice(&[(2, 740), (0, 520)]),
++            }
++            self.sample += 1;
++        }
++    }
++
++    #[test]
++    fn failed_and_reordered_ccds_never_change_channel_identity() {
++        let channels = ["package", "CCD0", "CCD2"]
++            .into_iter()
++            .map(|label| Channel {
++                label: label.into(),
++                kind: Kind::Cpu,
++                warn: 750,
++                hot: 900,
++            })
++            .collect();
++        let mut sensors = Sensors::test_fixture(channels);
++        sensors.cpu = Some(Box::new(IntermittentCpu { sample: 0 }));
++        sensors.cpu_channels = 3;
++        sensors.ccd_ids = vec![0, 2];
++        let mut out = vec![NO_VALUE; 3];
++        sensors.sample_into(&mut out);
++        assert_eq!(out, [800, 510, 720]);
++        sensors.sample_into(&mut out);
++        assert_eq!(out, [800, NO_VALUE, 730]);
++        sensors.sample_into(&mut out);
++        assert_eq!(out, [800, 520, 740]);
++    }
++}
+diff --git a/audit/original/src/sensors/nvml.rs b/src/sensors/nvml.rs
+index 5dba052..3e400e5 100644
+--- a/audit/original/src/sensors/nvml.rs
++++ b/src/sensors/nvml.rs
+@@ -1,17 +1,19 @@
+ //! NVIDIA GPU temperature via NVML.
+ //!
+-//! `nvml.dll` ships with the display driver and lives in System32, so this
+-//! needs no kernel driver, no admin rights and no redistributable. We resolve
++//! `nvml.dll` ships with the display driver, in System32 or NVIDIA's NVSMI
++//! directory. No additional kernel driver or admin rights are needed. We resolve
+ //! it with LoadLibrary/GetProcAddress rather than link-time import so the app
+ //! still starts cleanly on a machine with no NVIDIA GPU.
+ 
+ use std::ffi::c_void;
+ use windows_sys::Win32::Foundation::{FreeLibrary, HMODULE};
+-use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
++use windows_sys::Win32::System::LibraryLoader::{
++    GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR, LOAD_LIBRARY_SEARCH_SYSTEM32,
++};
+ 
+ type NvmlDevice = *mut c_void;
+ 
+-// NVML returns 0 (NVML_SUCCESS) or a negative-space error enum.
++// NVML returns 0 (NVML_SUCCESS) or a nonzero error code.
+ const NVML_SUCCESS: i32 = 0;
+ const NVML_TEMPERATURE_GPU: u32 = 0;
+ 
+@@ -22,23 +24,29 @@ type FnDeviceGetHandle = unsafe extern "C" fn(u32, *mut NvmlDevice) -> i32;
+ type FnDeviceGetTemp = unsafe extern "C" fn(NvmlDevice, u32, *mut u32) -> i32;
+ type FnDeviceGetName = unsafe extern "C" fn(NvmlDevice, *mut u8, u32) -> i32;
+ 
++struct Library(HMODULE);
++
++impl Drop for Library {
++    fn drop(&mut self) {
++        unsafe { FreeLibrary(self.0) };
++    }
++}
++
+ pub struct Nvml {
+-    module: HMODULE,
++    _module: Library,
+     shutdown: FnShutdown,
+     get_temp: FnDeviceGetTemp,
+     /// (handle, friendly name) for every GPU found at init.
+     devices: Vec<(NvmlDevice, String)>,
+ }
+ 
+-// The NVML handles are opaque pointers into a library we keep alive for the
+-// process lifetime, and we only ever touch them from the UI thread.
+-unsafe impl Send for Nvml {}
+-
+ macro_rules! sym {
+     ($module:expr, $name:literal, $ty:ty) => {{
+         let p = unsafe { GetProcAddress($module, concat!($name, "\0").as_ptr()) };
+         match p {
+-            Some(p) => Some(unsafe { std::mem::transmute::<_, $ty>(p) }),
++            Some(p) => {
++                Some(unsafe { std::mem::transmute::<unsafe extern "system" fn() -> isize, $ty>(p) })
++            }
+             None => None,
+         }
+     }};
+@@ -46,15 +54,43 @@ macro_rules! sym {
+ 
+ impl Nvml {
+     pub fn open() -> Option<Self> {
+-        let module = unsafe { LoadLibraryA(c"nvml.dll".as_ptr() as *const u8) };
++        let name: Vec<u16> = "nvml.dll\0".encode_utf16().collect();
++        let mut module = unsafe {
++            LoadLibraryExW(
++                name.as_ptr(),
++                std::ptr::null_mut(),
++                LOAD_LIBRARY_SEARCH_SYSTEM32,
++            )
++        };
++        if module.is_null() {
++            // Standard (non-DCH) drivers use NVIDIA's NVSMI directory.
++            let root =
++                std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"))?;
++            let path = std::path::PathBuf::from(root).join(r"NVIDIA Corporation\NVSMI\nvml.dll");
++            let path: Vec<u16> = path
++                .as_os_str()
++                .to_string_lossy()
++                .encode_utf16()
++                .chain(Some(0))
++                .collect();
++            module = unsafe {
++                LoadLibraryExW(
++                    path.as_ptr(),
++                    std::ptr::null_mut(),
++                    LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32,
++                )
++            };
++        }
+         if module.is_null() {
+             return None;
+         }
++        // Own the DLL before resolving symbols so every early return unloads it.
++        let library = Library(module);
+ 
+         // The _v2 entry points are the modern ABI; fall back to the legacy
+         // names on very old drivers.
+-        let init = sym!(module, "nvmlInit_v2", FnInit)
+-            .or_else(|| sym!(module, "nvmlInit", FnInit))?;
++        let init =
++            sym!(module, "nvmlInit_v2", FnInit).or_else(|| sym!(module, "nvmlInit", FnInit))?;
+         let shutdown = sym!(module, "nvmlShutdown", FnShutdown)?;
+         let get_count = sym!(module, "nvmlDeviceGetCount_v2", FnDeviceGetCount)
+             .or_else(|| sym!(module, "nvmlDeviceGetCount", FnDeviceGetCount))?;
+@@ -64,13 +100,12 @@ impl Nvml {
+         let get_name = sym!(module, "nvmlDeviceGetName", FnDeviceGetName);
+ 
+         if unsafe { init() } != NVML_SUCCESS {
+-            unsafe { FreeLibrary(module) };
+             return None;
+         }
+ 
+         let mut count: u32 = 0;
+         if unsafe { get_count(&mut count) } != NVML_SUCCESS || count == 0 {
+-            unsafe { shutdown(); FreeLibrary(module) };
++            unsafe { shutdown() };
+             return None;
+         }
+ 
+@@ -83,34 +118,42 @@ impl Nvml {
+             let name = get_name
+                 .and_then(|f| {
+                     let mut buf = [0u8; 96];
+-                    (unsafe { f(dev, buf.as_mut_ptr(), buf.len() as u32) } == NVML_SUCCESS)
+-                        .then(|| {
++                    (unsafe { f(dev, buf.as_mut_ptr(), buf.len() as u32) } == NVML_SUCCESS).then(
++                        || {
+                             let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+                             String::from_utf8_lossy(&buf[..end]).into_owned()
+-                        })
++                        },
++                    )
+                 })
+                 .unwrap_or_else(|| format!("GPU {i}"));
+             devices.push((dev, shorten(&name)));
+         }
+ 
+         if devices.is_empty() {
+-            unsafe { shutdown(); FreeLibrary(module) };
++            unsafe { shutdown() };
+             return None;
+         }
+ 
+-        Some(Self { module, shutdown, get_temp, devices })
++        Some(Self {
++            _module: library,
++            shutdown,
++            get_temp,
++            devices,
++        })
+     }
+ 
+     pub fn device_names(&self) -> impl Iterator<Item = &str> {
+         self.devices.iter().map(|(_, n)| n.as_str())
+     }
+ 
+-    /// Core temperature in whole degrees C for device `idx`.
++    /// Core temperature in tenths of a degree C (sensor precision is 1 C).
+     pub fn read(&self, idx: usize) -> Option<i16> {
+         let (dev, _) = self.devices.get(idx)?;
+         let mut t: u32 = 0;
+-        (unsafe { (self.get_temp)(*dev, NVML_TEMPERATURE_GPU, &mut t) } == NVML_SUCCESS)
+-            .then_some(t as i16)
++        if unsafe { (self.get_temp)(*dev, NVML_TEMPERATURE_GPU, &mut t) } != NVML_SUCCESS {
++            return None;
++        }
++        i16::try_from(t).ok()?.checked_mul(10)
+     }
+ }
+ 
+@@ -118,7 +161,6 @@ impl Drop for Nvml {
+     fn drop(&mut self) {
+         unsafe {
+             (self.shutdown)();
+-            FreeLibrary(self.module);
+         }
+     }
+ }
+diff --git a/audit/original/src/sensors/ryzen_sdk.rs b/src/sensors/ryzen_sdk.rs
+index b6add57..e58b715 100644
+--- a/audit/original/src/sensors/ryzen_sdk.rs
++++ b/src/sensors/ryzen_sdk.rs
+@@ -198,7 +198,7 @@ unsafe fn wide_to_string(p: *const u16) -> String {
+         return String::new();
+     }
+     let mut len = 0usize;
+-    while *p.add(len) != 0 && len < 256 {
++    while len < 256 && *p.add(len) != 0 {
+         len += 1;
+     }
+     String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
+@@ -221,7 +221,11 @@ impl RyzenSdk {
+             return None;
+         };
+         let Some(dll_path) = loc.dll else {
+-            step!(log, "locate: Platform.dll missing under {}", loc.root.display());
++            step!(
++                log,
++                "locate: Platform.dll missing under {}",
++                loc.root.display()
++            );
+             return None;
+         };
+         step!(log, "locate: {}", dll_path.display());
+@@ -231,17 +235,25 @@ impl RyzenSdk {
+         // touching the process-wide DLL search path.
+         let wpath = wide(&dll_path.to_string_lossy());
+         let lib = unsafe {
+-            LoadLibraryExW(wpath.as_ptr(), std::ptr::null_mut(), LOAD_WITH_ALTERED_SEARCH_PATH)
++            LoadLibraryExW(
++                wpath.as_ptr(),
++                std::ptr::null_mut(),
++                LOAD_WITH_ALTERED_SEARCH_PATH,
++            )
+         };
+         if lib.is_null() {
+-            step!(log, "LoadLibraryEx: FAILED (err {})", unsafe { windows_sys::Win32::Foundation::GetLastError() });
++            step!(log, "LoadLibraryEx: FAILED (err {})", unsafe {
++                windows_sys::Win32::Foundation::GetLastError()
++            });
+             return None;
+         }
+         step!(log, "LoadLibraryEx: ok");
+ 
+         let get_platform: FnGetPlatform = unsafe {
+             match GetProcAddress(lib, c"GetPlatform".as_ptr() as *const u8) {
+-                Some(p) => std::mem::transmute(p),
++                Some(p) => {
++                    std::mem::transmute::<unsafe extern "system" fn() -> isize, FnGetPlatform>(p)
++                }
+                 None => {
+                     step!(log, "GetProcAddress(GetPlatform): FAILED");
+                     FreeLibrary(lib);
+@@ -262,9 +274,7 @@ impl RyzenSdk {
+             // defaults AMD's own sample relies on. Defaults in C++
+             // are applied at the call site, so both arguments must be passed
+             // explicitly.
+-            // have no use for.
+-            let init: FnInitPlatform =
+-                std::mem::transmute(vslot(platform, IPLATFORM_INIT));
++            let init: FnInitPlatform = std::mem::transmute(vslot(platform, IPLATFORM_INIT));
+             let ok = init(platform, std::ptr::null(), false);
+             step!(log, "IPlatform::Init -> {}", ok);
+             if !ok {
+@@ -292,8 +302,7 @@ impl RyzenSdk {
+                     continue;
+                 }
+                 // Confirm we are holding a CPU device before trusting it.
+-                let get_type: FnGetType =
+-                    std::mem::transmute(vslot(candidate, IDEVICE_GET_TYPE));
++                let get_type: FnGetType = std::mem::transmute(vslot(candidate, IDEVICE_GET_TYPE));
+                 let ty = get_type(candidate);
+                 step!(log, "slot {}: device {:p} type {}", slot, candidate, ty);
+                 if ty == DT_CPU {
+@@ -313,10 +322,7 @@ impl RyzenSdk {
+             let mut cores: u32 = 0;
+             let rc = get_core_count(cpu, &mut cores);
+             step!(log, "GetCoreCount -> rc {} cores {}", rc, cores);
+-            if rc != B_SUCCESS
+-                || cores == 0
+-                || cores as usize > MAX_CORES
+-            {
++            if rc != B_SUCCESS || cores == 0 || cores as usize > MAX_CORES {
+                 Self::teardown(platform, lib);
+                 return None;
+             }
+@@ -432,3 +438,18 @@ pub fn diagnose() -> String {
+     }
+     log
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn parameter_layout_matches_installed_amd_sdk_x64_headers() {
++        assert_eq!(std::mem::size_of::<EffectiveFreqData>(), 40);
++        assert_eq!(std::mem::size_of::<CpuParameters>(), 192);
++        assert_eq!(std::mem::offset_of!(CpuParameters, st_freq_data), 8);
++        assert_eq!(std::mem::offset_of!(CpuParameters, d_temperature), 72);
++        assert_eq!(std::mem::offset_of!(CpuParameters, f_ppt_limit), 104);
++        assert_eq!(std::mem::offset_of!(CpuParameters, f_edc_value_ccd), 184);
++    }
++}
+diff --git a/audit/original/src/sensors/storage.rs b/src/sensors/storage.rs
+index 54bc1ff..abc10b8 100644
+--- a/audit/original/src/sensors/storage.rs
++++ b/src/sensors/storage.rs
+@@ -5,14 +5,17 @@
+ //! no elevation -- the handle is opened with zero desired access, which is
+ //! enough for a property query.
+ //!
+-//! Structures are declared locally rather than pulled from a windows-sys
+-//! feature so this module depends only on CreateFileW/DeviceIoControl.
++//! The Windows SDK types supply the exact descriptor offsets and entry sizes;
++//! response bytes are decoded without creating potentially unaligned references.
+ 
+ use std::ffi::c_void;
+ use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+ use windows_sys::Win32::Storage::FileSystem::{
+     CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+ };
++use windows_sys::Win32::System::Ioctl::{
++    STORAGE_TEMPERATURE_DATA_DESCRIPTOR, STORAGE_TEMPERATURE_INFO,
++};
+ use windows_sys::Win32::System::IO::DeviceIoControl;
+ 
+ // CTL_CODE(IOCTL_STORAGE_BASE 0x2D, 0x0500, METHOD_BUFFERED, FILE_ANY_ACCESS)
+@@ -32,30 +35,9 @@ struct StoragePropertyQuery {
+     additional_parameters: [u8; 4],
+ }
+ 
+-#[repr(C)]
+-struct StorageTemperatureInfo {
+-    index: u16,
+-    temperature: i16,
+-    over_threshold: i16,
+-    under_threshold: i16,
+-    over_threshold_changed: u8,
+-    under_threshold_changed: u8,
+-}
+-
+-#[repr(C)]
+-struct StorageTemperatureDataDescriptor {
+-    version: u32,
+-    size: u32,
+-    critical_temperature: i16,
+-    warning_temperature: i16,
+-    info_count: u16,
+-    reserved0: [u8; 2],
+-    reserved1: [u32; 2],
+-    // Followed by info_count * StorageTemperatureInfo.
+-}
+-
+ pub struct Drive {
+-    index: u32,
++    /// Allocate/encode the device path once, while keeping handles short-lived.
++    path: Vec<u16>,
+     pub label: String,
+ }
+ 
+@@ -63,8 +45,7 @@ fn wide(s: &str) -> Vec<u16> {
+     s.encode_utf16().chain(std::iter::once(0)).collect()
+ }
+ 
+-fn open_drive(index: u32) -> Option<HANDLE> {
+-    let path = wide(&format!("\\\\.\\PhysicalDrive{index}"));
++fn open_drive(path: &[u16]) -> Option<HANDLE> {
+     let h = unsafe {
+         CreateFileW(
+             path.as_ptr(),
+@@ -103,11 +84,11 @@ fn query(h: HANDLE, property_id: u32, out: &mut [u8]) -> Option<u32> {
+ 
+ /// Pull the product ID out of a STORAGE_DEVICE_DESCRIPTOR blob.
+ fn product_name(buf: &[u8], returned: u32) -> Option<String> {
++    let buf = buf.get(..returned as usize)?;
+     if returned < 36 {
+         return None;
+     }
+-    let product_id_offset =
+-        u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]) as usize;
++    let product_id_offset = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]) as usize;
+     if product_id_offset == 0 || product_id_offset >= returned as usize {
+         return None;
+     }
+@@ -122,7 +103,8 @@ fn product_name(buf: &[u8], returned: u32) -> Option<String> {
+ pub fn detect() -> Vec<Drive> {
+     let mut drives = Vec::new();
+     for index in 0..MAX_DRIVES {
+-        let Some(h) = open_drive(index) else { continue };
++        let path = wide(&format!("\\\\.\\PhysicalDrive{index}"));
++        let Some(h) = open_drive(&path) else { continue };
+ 
+         let mut temp_buf = [0u8; 512];
+         let supports_temp = query(h, STORAGE_DEVICE_TEMPERATURE_PROPERTY, &mut temp_buf)
+@@ -141,34 +123,40 @@ pub fn detect() -> Vec<Drive> {
+         unsafe { CloseHandle(h) };
+ 
+         if supports_temp {
+-            drives.push(Drive { index, label: shorten(&label) });
++            drives.push(Drive {
++                path,
++                label: shorten(&label),
++            });
+         }
+     }
+     drives
+ }
+ 
+ fn parse_temperature(buf: &[u8], returned: u32) -> Option<i16> {
+-    let header = std::mem::size_of::<StorageTemperatureDataDescriptor>();
+-    if (returned as usize) < header {
++    let buf = buf.get(..returned as usize)?;
++    let header = std::mem::offset_of!(STORAGE_TEMPERATURE_DATA_DESCRIPTOR, TemperatureInfo);
++    let entry = std::mem::size_of::<STORAGE_TEMPERATURE_INFO>();
++    if buf.len() < header {
+         return None;
+     }
+-    let desc = unsafe { &*(buf.as_ptr() as *const StorageTemperatureDataDescriptor) };
+-    if desc.info_count == 0 {
++    let version = u32::from_le_bytes(buf[0..4].try_into().ok()?) as usize;
++    let size = u32::from_le_bytes(buf[4..8].try_into().ok()?) as usize;
++    let count = u16::from_le_bytes(buf[12..14].try_into().ok()?) as usize;
++    if version < header + entry || size > buf.len() || size < header + count * entry || count == 0 {
+         return None;
+     }
+-
+-    let entry = std::mem::size_of::<StorageTemperatureInfo>();
+-    if (returned as usize) < header + entry {
+-        return None;
++    // Select the composite/primary sensor by its ID, not its position.
++    // The entry is 16 bytes, including the reserved fields omitted in the
++    // old hand-written struct. Windows temperatures are signed Celsius.
++    for info in buf[header..header + count * entry].chunks_exact(entry) {
++        let index = u16::from_le_bytes([info[0], info[1]]);
++        if index == 0 {
++            let c = i16::from_le_bytes([info[2], info[3]]);
++            // Checked conversion also rejects the unavailable value 0x8000.
++            return c.checked_mul(10);
+         }
+-
+-    // Index 0 is the composite/primary sensor on every NVMe device.
+-    let info = unsafe { &*(buf.as_ptr().add(header) as *const StorageTemperatureInfo) };
+-
+-    // The storage stack reports whole degrees Celsius. 0 usually means
+-    // "not reported" rather than a genuine 0 C on a running drive.
+-    let c = info.temperature;
+-    (c > 0 && c < 150).then_some(c * 10)
++    }
++    None
+ }
+ 
+ impl Drive {
+@@ -178,7 +166,7 @@ impl Drive {
+     /// lifetime, so the app never keeps a reference that would block a drive
+     /// from sleeping or being safely removed.
+     pub fn read(&self) -> Option<i16> {
+-        let h = open_drive(self.index)?;
++        let h = open_drive(&self.path)?;
+         let mut buf = [0u8; 512];
+         let result = query(h, STORAGE_DEVICE_TEMPERATURE_PROPERTY, &mut buf)
+             .and_then(|n| parse_temperature(&buf, n));
+@@ -190,9 +178,70 @@ impl Drive {
+ /// Trim vendor noise so labels fit the popup's column.
+ fn shorten(name: &str) -> String {
+     let s = name.trim();
+-    if s.len() <= 22 {
++    if s.chars().count() <= 22 {
+         s.to_string()
+     } else {
+-        format!("{}...", &s[..19])
++        format!("{}...", s.chars().take(19).collect::<String>())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn descriptor(entries: &[(u16, i16)]) -> Vec<u8> {
++        // Independent wire fixture from winioctl.h: 24-byte header + 16 per sensor.
++        let mut b = vec![0; 24 + 16 * entries.len()];
++        let size = b.len() as u32;
++        b[0..4].copy_from_slice(&40u32.to_le_bytes());
++        b[4..8].copy_from_slice(&size.to_le_bytes());
++        b[12..14].copy_from_slice(&(entries.len() as u16).to_le_bytes());
++        for (i, (id, temp)) in entries.iter().enumerate() {
++            b[24 + i * 16..26 + i * 16].copy_from_slice(&id.to_le_bytes());
++            b[26 + i * 16..28 + i * 16].copy_from_slice(&temp.to_le_bytes());
++        }
++        b
++    }
++
++    #[test]
++    fn reads_composite_by_id_with_correct_stride_and_unaligned_input() {
++        let b = descriptor(&[(1, 78), (0, 42)]);
++        let mut unaligned = vec![0];
++        unaligned.extend_from_slice(&b);
++        assert_eq!(
++            parse_temperature(&unaligned[1..], b.len() as u32),
++            Some(420)
++        );
++    }
++
++    #[test]
++    fn rejects_truncated_and_inconsistent_driver_responses() {
++        let b = descriptor(&[(0, 42)]);
++        for n in 0..b.len() {
++            assert_eq!(parse_temperature(&b, n as u32), None);
++        }
++        assert_eq!(parse_temperature(&b, 1000), None);
++        let mut bad = b.clone();
++        bad[12..14].copy_from_slice(&2u16.to_le_bytes());
++        assert_eq!(parse_temperature(&bad, bad.len() as u32), None);
++        assert_eq!(product_name(&[0; 36], 1000), None);
++    }
++
++    #[test]
++    fn handles_zero_negative_and_unavailable_temperatures() {
++        for (temp, expected) in [
++            (0, Some(0)),
++            (-5, Some(-50)),
++            (i16::MIN, None),
++            (i16::MAX, None),
++        ] {
++            let b = descriptor(&[(0, temp)]);
++            assert_eq!(parse_temperature(&b, b.len() as u32), expected);
++        }
++    }
++
++    #[test]
++    fn label_truncation_preserves_unicode() {
++        assert_eq!(shorten(&"界".repeat(25)), format!("{}...", "界".repeat(19)));
+     }
+ }
+diff --git a/audit/original/src/tray.rs b/src/tray.rs
+index a3f08d9..a884c2b 100644
+--- a/audit/original/src/tray.rs
++++ b/src/tray.rs
+@@ -9,14 +9,14 @@ use std::ffi::c_void;
+ use windows_sys::Win32::Foundation::{HWND, RECT};
+ use windows_sys::Win32::Graphics::Gdi::{
+     CreateBitmap, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
+-    DrawTextW, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor, ANTIALIASED_QUALITY,
+-    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DEFAULT_CHARSET, DT_CALCRECT, DT_CENTER, DT_NOCLIP,
+-    DT_SINGLELINE, DT_VCENTER, DIB_RGB_COLORS, FF_DONTCARE, FW_BOLD, HBITMAP, HGDIOBJ,
+-    OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, TRANSPARENT, VARIABLE_PITCH,
++    DrawTextW, GdiFlush, GetDC, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
++    ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CLIP_DEFAULT_PRECIS,
++    DEFAULT_CHARSET, DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_NOCLIP, DT_SINGLELINE, DT_VCENTER,
++    FF_DONTCARE, FW_BOLD, HBITMAP, HGDIOBJ, OUT_DEFAULT_PRECIS, TRANSPARENT, VARIABLE_PITCH,
+ };
+ use windows_sys::Win32::UI::Shell::{
+-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+-    NIM_SETVERSION, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
++    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_SHOWTIP, NIF_TIP, NIM_ADD, NIM_DELETE,
++    NIM_MODIFY, NIM_SETVERSION, NOTIFYICONDATAW, NOTIFYICON_VERSION_4,
+ };
+ use windows_sys::Win32::UI::WindowsAndMessaging::{
+     CreateIconIndirect, DestroyIcon, GetSystemMetrics, HICON, ICONINFO, SM_CXSMICON, SM_CYSMICON,
+@@ -32,6 +32,7 @@ pub struct Tray {
+     icon: HICON,
+     /// Last rendered (text, colour), to skip redundant icon rebuilds.
+     last: Option<(String, u32)>,
++    tip: [u16; 128],
+     size: i32,
+ }
+ 
+@@ -47,14 +48,21 @@ impl Tray {
+             .max(unsafe { GetSystemMetrics(SM_CYSMICON) })
+             .max(16);
+ 
+-        let mut tray = Self { hwnd, icon: std::ptr::null_mut(), last: None, size };
++        let mut tray = Self {
++            hwnd,
++            icon: std::ptr::null_mut(),
++            last: None,
++            tip: [0; 128],
++            size,
++        };
+         tray.icon = render_icon("--", theme::TEXT_DIM, size);
+ 
+         let mut data = tray.base_data();
+-        data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
++        data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
+         data.uCallbackMessage = WM_TRAY;
+         data.hIcon = tray.icon;
+         copy_tip(&mut data.szTip, "tempmanager - starting");
++        tray.tip = data.szTip;
+         unsafe { Shell_NotifyIconW(NIM_ADD, &data) };
+ 
+         // Version 4 gives us proper per-message cursor coordinates in lParam.
+@@ -82,8 +90,11 @@ impl Tray {
+             .unwrap_or(true);
+ 
+         let mut data = self.base_data();
+-        data.uFlags = NIF_TIP;
++        data.uFlags = NIF_TIP | NIF_SHOWTIP;
+         copy_tip(&mut data.szTip, tip);
++        if !changed && data.szTip == self.tip {
++            return;
++        }
+ 
+         if changed {
+             let icon = render_icon(text, color, self.size);
+@@ -92,24 +103,30 @@ impl Tray {
+                 self.icon = icon;
+                 data.uFlags |= NIF_ICON;
+                 data.hIcon = icon;
+-                unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
++                let updated = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } != 0;
+                 if !old.is_null() {
+                     unsafe { DestroyIcon(old) };
+                 }
++                if updated {
+                     self.last = Some((text.to_string(), color));
++                    self.tip = data.szTip;
++                }
+                 return;
+             }
+         }
+ 
+-        unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
++        if unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) } != 0 {
++            self.tip = data.szTip;
++        }
+     }
+ 
+     /// Re-add the icon after an Explorer restart.
+     pub fn readd(&mut self) {
+         let mut data = self.base_data();
+-        data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
++        data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
+         data.uCallbackMessage = WM_TRAY;
+         data.hIcon = self.icon;
++        data.szTip = self.tip;
+         unsafe { Shell_NotifyIconW(NIM_ADD, &data) };
+         data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+         unsafe { Shell_NotifyIconW(NIM_SETVERSION, &data) };
+@@ -129,10 +146,14 @@ impl Drop for Tray {
+ }
+ 
+ fn copy_tip(dst: &mut [u16; 128], s: &str) {
+-    let src = wide(s);
+-    let n = src.len().min(dst.len());
+-    dst[..n].copy_from_slice(&src[..n]);
+-    dst[dst.len() - 1] = 0;
++    dst.fill(0);
++    for (slot, unit) in dst[..127].iter_mut().zip(s.encode_utf16()) {
++        *slot = unit;
++    }
++    // Never leave a truncated high surrogate at the end of the tooltip.
++    if (0xD800..=0xDBFF).contains(&dst[126]) {
++        dst[126] = 0;
++    }
+ }
+ 
+ /// Paint `text` into a 32-bit ARGB DIB and wrap it as an icon.
+@@ -166,8 +187,18 @@ fn render_icon(text: &str, color: u32, size: i32) -> HICON {
+         };
+ 
+         let mut bits: *mut c_void = std::ptr::null_mut();
+-        let dib = CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
++        let dib = CreateDIBSection(
++            dc,
++            &info,
++            DIB_RGB_COLORS,
++            &mut bits,
++            std::ptr::null_mut(),
++            0,
++        );
+         if dib.is_null() || bits.is_null() {
++            if !dib.is_null() {
++                DeleteObject(dib as HGDIOBJ);
++            }
+             DeleteDC(dc);
+             return std::ptr::null_mut();
+         }
+@@ -203,7 +234,12 @@ fn render_icon(text: &str, color: u32, size: i32) -> HICON {
+                 break;
+             }
+             let old = SelectObject(dc, f as HGDIOBJ);
+-            let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
++            let mut r = RECT {
++                left: 0,
++                top: 0,
++                right: 0,
++                bottom: 0,
++            };
+             DrawTextW(
+                 dc,
+                 wtext.as_ptr(),
+@@ -228,7 +264,12 @@ fn render_icon(text: &str, color: u32, size: i32) -> HICON {
+             let old_font = SelectObject(dc, chosen as HGDIOBJ);
+             SetBkMode(dc, TRANSPARENT as i32);
+             SetTextColor(dc, 0x00FF_FFFF); // white; becomes the alpha channel
+-            let mut r = RECT { left: 0, top: 0, right: size, bottom: size };
++            let mut r = RECT {
++                left: 0,
++                top: 0,
++                right: size,
++                bottom: size,
++            };
+             DrawTextW(
+                 dc,
+                 wtext.as_ptr(),
+@@ -240,11 +281,13 @@ fn render_icon(text: &str, color: u32, size: i32) -> HICON {
+             DeleteObject(chosen as HGDIOBJ);
+         }
+ 
++        // Complete batched GDI writes before reading the DIB's memory.
++        GdiFlush();
+         // Luminance -> alpha, then premultiply the requested colour.
+         let (cr, cg, cb) = (
+-            (color & 0xFF) as u32,
+-            ((color >> 8) & 0xFF) as u32,
+-            ((color >> 16) & 0xFF) as u32,
++            (color & 0xFF),
++            ((color >> 8) & 0xFF),
++            ((color >> 16) & 0xFF),
+         );
+         for px in pixels.iter_mut() {
+             let v = *px;
+@@ -282,3 +325,17 @@ fn render_icon(text: &str, color: u32, size: i32) -> HICON {
+     }
+ }
+ 
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn tooltip_terminates_and_clears_old_content_without_splitting_unicode() {
++        let mut tip = [0; 128];
++        copy_tip(&mut tip, &format!("{}🌡", "a".repeat(126)));
++        assert_eq!(tip[126], 0);
++        assert_eq!(tip[127], 0);
++        copy_tip(&mut tip, "GPU: 42°");
++        assert!(tip[8..].iter().all(|v| *v == 0));
++    }
++}

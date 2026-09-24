@@ -1,0 +1,13 @@
+/target/
+/dist/
+
+# Local review scratch: machine-specific configs, startup-task exports, and
+# the pre-review source tree (preserved in audit/source-before-review.zip).
+/audit/original/
+/audit/*-config/
+/audit/startup-*
+/audit/update-startup-task.ps1
+
+# Diagnostic output written next to the exe
+probe.txt
+popup.bmp
