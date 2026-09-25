@@ -1,7 +1,35 @@
-# tempmanager
+<p align="center">
+  <img src="assets/icon-256.png" width="112" alt="tempmanager icon">
+</p>
 
-A Windows tray temperature readout written in Rust against native Win32.
-Left-click the icon for current readings, a history chart, and an interval slider.
+<h1 align="center">tempmanager</h1>
+
+<p align="center">
+  A tiny Windows tray app that shows your CPU, GPU, and SSD temperatures at a glance.
+</p>
+
+<p align="center">
+  <a href="https://github.com/ExplodingCB/tempmanager/releases/latest"><img src="https://img.shields.io/github/v/release/ExplodingCB/tempmanager?label=release" alt="Latest release"></a>
+  <img src="https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-0078D4" alt="Windows 10 | 11">
+  <img src="https://img.shields.io/badge/built%20with-Rust-B7410E" alt="Built with Rust">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/ExplodingCB/tempmanager" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <img src="docs/popup.png" width="427" alt="tempmanager popup showing Ryzen CPU, RTX GPU, and two NVMe drives with a history chart">
+</p>
+
+## Features
+
+- **Live temperature in the taskbar.** The tray icon shows the hottest reading
+  (or just the CPU or GPU) and turns amber, then red, as it heats up.
+- **Popup with history.** Click the icon for every sensor plus a chart of up to
+  the last 240 readings.
+- **Covers the main hardware.** AMD Ryzen CPUs, NVIDIA GPUs, and NVMe/SATA drives.
+- **Barely there.** Native Win32 and Rust with no runtime or framework. The
+  installer is about 2 MB.
+- **Adjustable sampling.** From every second up to every 5 minutes. Celsius or
+  Fahrenheit. Can start with Windows.
 
 ## Install
 
@@ -20,6 +48,25 @@ AMD SDK and an elevated process; see [SETUP.md](SETUP.md).
 
 > The executable and installer are not code-signed, so SmartScreen may show
 > "Windows protected your PC" the first time. Choose **More info > Run anyway**.
+
+## Usage
+
+Left-click the tray icon to open the popup. The slider changes the background
+sampling interval from 1 second to 5 minutes. It saves on release; the popup
+continues requesting live readings while open.
+
+Right-click to choose the tray source (hottest / first CPU / first GPU), switch
+Celsius/Fahrenheit, toggle Start with Windows, restart elevated when needed, or exit.
+Settings are stored in `%APPDATA%\tempmanager\config.ini`.
+
+Start with Windows uses a scheduled task when configured while elevated and a
+Run-key entry otherwise. The existing startup controls do not reliably report
+registration failures; see the remaining findings in the
+[review report](audit/REVIEW.md).
+
+---
+
+# Technical details
 
 ## Sensor sources and accuracy
 
@@ -73,20 +120,6 @@ sensor libraries and process privileges. See [the review report](audit/REVIEW.md
 for measured results, methodology, and limits; the old 1.8 MB figure was not a
 complete account of the process's memory.
 
-## Usage
-
-Left-click the tray icon to open the popup. The slider changes the background
-sampling interval from 1 second to 5 minutes. It saves on release; the popup
-continues requesting live readings while open.
-
-Right-click to choose the tray source (hottest / first CPU / first GPU), switch
-Celsius/Fahrenheit, toggle Start with Windows, restart elevated when needed, or exit.
-Settings are stored in `%APPDATA%\tempmanager\config.ini`.
-
-Start with Windows uses a scheduled task when configured while elevated and a
-Run-key entry otherwise. The existing startup controls do not reliably report
-registration failures; see the remaining findings in the review report.
-
 ## Diagnostics
 
 ```powershell
@@ -135,13 +168,18 @@ its own process with isolated settings and stops only that process afterward.
 ## Releasing
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`, which builds, tests,
-compiles the installer from `installer/tempmanager.iss`, and publishes a GitHub
-release with the installer and portable exe. To build the installer locally,
-install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run:
+embeds the app icon, compiles the installer from `installer/tempmanager.iss`,
+and publishes a GitHub release with the installer and portable exe. To do the
+same locally, install [Inno Setup 6](https://jrsoftware.org/isinfo.php) and run:
 
 ```powershell
+cargo build --release
+.\scripts\set-exe-icon.ps1 target\x86_64-pc-windows-gnu\release\tempmanager.exe assets\tempmanager.ico
 iscc /DAppVersion=0.1.0 installer\tempmanager.iss
 ```
+
+The icon is patched into the finished exe because the GNU toolchain ships no
+resource compiler.
 
 The installer lands in `dist/`. After a release is published, submit the new
 version to winget with

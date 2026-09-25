@@ -24,6 +24,10 @@ jobs:
       - name: Build
         run: cargo build --release
 
+      - name: Embed app icon
+        shell: pwsh
+        run: ./scripts/set-exe-icon.ps1 target/x86_64-pc-windows-gnu/release/tempmanager.exe assets/tempmanager.ico
+
       - name: Build installer
         shell: pwsh
         run: |
